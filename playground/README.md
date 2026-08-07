@@ -71,6 +71,7 @@ Vite proxies `/api` to the backend on this machine.
 - Hover labels, click to select, **Fly to camera**
 - Inspector with proxied NASA thumbnail
 - **Stereo pairs**: ranked L/R Navcam–MCZ–Hazcam matches, teal baseline in 3D, side-by-side thumbs, JSON export
+- **Mission path mode**: schematic 3D trail of `(site, drive)` stops ordered by sol (not map coordinates); click a node to open that stop’s local camera cloud
 
 ## Coordinate model
 
