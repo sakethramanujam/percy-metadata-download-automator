@@ -167,6 +167,46 @@ def get_image(imageid: str) -> Optional[dict[str, Any]]:
     return row
 
 
+def stereo_pairs_for_stop(
+    site: int,
+    drive: int,
+    *,
+    max_pairs: int = 100,
+    max_dt_sclk: float = 60.0,
+    min_score: float = 25.0,
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+    family: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Return ranked stereo L/R pairs for a site/drive stop."""
+    from playground.api.stereo import find_stereo_pairs
+
+    img = load_images()
+    mask = (img["site"] == site) & (img["drive"] == drive)
+    sub = img.loc[mask].copy()
+    if sol_min is not None:
+        sub = sub[sub["sol"].fillna(-1) >= sol_min]
+    if sol_max is not None:
+        sub = sub[sub["sol"].fillna(10**9) <= sol_max]
+
+    pairs = find_stereo_pairs(
+        sub,
+        max_dt_sclk=max_dt_sclk,
+        max_pairs=max_pairs,
+        min_score=min_score,
+        families=family,
+    )
+    return {
+        "site": site,
+        "drive": drive,
+        "n_images": int(len(sub)),
+        "n_pairs": len(pairs),
+        "max_dt_sclk": max_dt_sclk,
+        "min_score": min_score,
+        "pairs": pairs,
+    }
+
+
 def stats() -> dict[str, Any]:
     manifest = load_manifest()
     img = load_images()

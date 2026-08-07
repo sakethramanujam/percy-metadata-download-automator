@@ -18,6 +18,7 @@ from playground.api.data import (
     load_manifest,
     reload_indexes,
     stats,
+    stereo_pairs_for_stop,
 )
 
 app = FastAPI(
@@ -93,6 +94,34 @@ def api_cameras(
             sol_max=sol_max,
             limit=limit,
             offset=offset,
+        )
+    except IndexNotBuiltError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.get("/api/stops/{site}/{drive}/stereo-pairs")
+def api_stereo_pairs(
+    site: int,
+    drive: int,
+    max_pairs: int = Query(100, ge=1, le=500),
+    max_dt_sclk: float = Query(60.0, ge=0.1, le=600.0),
+    min_score: float = Query(25.0, ge=0.0),
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+    family: Optional[list[str]] = Query(
+        None, description="Filter families: NAVCAM, MCZ, HAZCAM"
+    ),
+):
+    try:
+        return stereo_pairs_for_stop(
+            site,
+            drive,
+            max_pairs=max_pairs,
+            max_dt_sclk=max_dt_sclk,
+            min_score=min_score,
+            sol_min=sol_min,
+            sol_max=sol_max,
+            family=family,
         )
     except IndexNotBuiltError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
