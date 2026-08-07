@@ -388,6 +388,87 @@ body,
   object-fit: contain;
 }
 
+.view-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.view-toggle button {
+  flex: 1;
+  cursor: pointer;
+  background: #0d131a;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.view-toggle button.active {
+  border-color: var(--accent);
+  background: #1c2633;
+  color: #ffe6b0;
+}
+
+.view-toggle button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mission-path-wrap {
+  position: absolute;
+  inset: 0 0 52px 0;
+}
+
+.mission-hud {
+  bottom: 60px;
+  pointer-events: none;
+}
+
+.path3d-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: rgba(8, 12, 18, 0.82);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 10px;
+  color: #e7eef7;
+  white-space: nowrap;
+}
+
+.path3d-label.active {
+  border-color: var(--accent);
+}
+
+.path3d-label .muted {
+  font-size: 9px;
+}
+
+.path3d-axis-label {
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+button.linkish {
+  background: none;
+  border: none;
+  color: var(--accent2);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+  pointer-events: auto;
+}
+
+.hud .muted {
+  pointer-events: auto;
+}
+
 .inspector {
   padding: 0 16px 16px;
   overflow: auto;

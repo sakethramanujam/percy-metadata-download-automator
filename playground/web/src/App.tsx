@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
+import MissionPath from "./MissionPath";
 import {
   Camera,
   StereoPair,
@@ -13,6 +14,8 @@ import {
   thumbUrl,
 } from "./api";
 
+type ViewMode = "path" | "stop";
+
 const LAYER_OPTIONS = [
   { id: "NAVCAM", match: (s: string) => s.includes("NAVCAM") },
   { id: "MCZ", match: (s: string) => s.includes("MCZ") },
@@ -25,6 +28,7 @@ export default function App() {
   const [stops, setStops] = useState<Stop[]>([]);
   const [stats, setStats] = useState<string>("");
   const [filter, setFilter] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("path");
   const [selectedStop, setSelectedStop] = useState<Stop | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selected, setSelected] = useState<Camera | null>(null);
@@ -73,8 +77,10 @@ export default function App() {
         setStats(
           `${st.n_stops} stops · ${st.n_posed.toLocaleString()} posed / ${st.n_images.toLocaleString()} images · sols ${st.sol_min ?? "?"}–${st.sol_max ?? "?"}`
         );
+        // Start on mission path; densest stop is pre-selected but path view is default
         const best = [...ordered].sort((a, b) => b.n_posed - a.n_posed)[0];
         if (best) setSelectedStop(best);
+        setViewMode("path");
       } catch (e) {
         setError(String(e));
       }
@@ -82,6 +88,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (viewMode !== "stop") return;
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) return;
     setLoading(true);
     setError(null);
@@ -111,7 +118,7 @@ export default function App() {
       .then((r) => setPairs(r.pairs))
       .catch(() => setPairs([]))
       .finally(() => setPairsLoading(false));
-  }, [selectedStop]);
+  }, [selectedStop, viewMode]);
 
   const solRange = useMemo(() => {
     const sols = cameras
@@ -262,8 +269,14 @@ export default function App() {
     setFlyToken((t) => t + 1);
   }
 
-  function selectStop(s: Stop) {
+  function selectStop(s: Stop, enterStop = true) {
     setSelectedStop(s);
+    if (enterStop) setViewMode("stop");
+  }
+
+  function openMissionPath() {
+    setViewMode("path");
+    setPlaying(false);
   }
 
   const pathStops = useMemo(() => stops.slice(0, 200), [stops]);
@@ -275,135 +288,182 @@ export default function App() {
         <div className="toolbar">
           <div className="muted">{health || "Connecting…"}</div>
           <div className="muted">{stats}</div>
+          <div className="view-toggle">
+            <button
+              type="button"
+              className={viewMode === "path" ? "active" : ""}
+              onClick={openMissionPath}
+            >
+              Mission path
+            </button>
+            <button
+              type="button"
+              className={viewMode === "stop" ? "active" : ""}
+              disabled={!selectedStop}
+              onClick={() => selectedStop && setViewMode("stop")}
+            >
+              Stop cameras
+            </button>
+          </div>
           <input
             placeholder="Filter stops (site, sol, id)"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
-          <div className="layers">
-            {LAYER_OPTIONS.map((l) => (
-              <label key={l.id}>
-                <input
-                  type="checkbox"
-                  checked={!!layers[l.id]}
-                  onChange={(e) =>
-                    setLayers((prev) => ({ ...prev, [l.id]: e.target.checked }))
-                  }
-                />
-                {l.id}
-              </label>
-            ))}
-            <label>
-              <input
-                type="checkbox"
-                checked={showRays}
-                onChange={(e) => setShowRays(e.target.checked)}
-              />
-              Rays
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={showFrustums}
-                onChange={(e) => setShowFrustums(e.target.checked)}
-              />
-              Frustums
-            </label>
-          </div>
-
-          <h2 style={{ margin: "4px 0 0" }}>Sol timeline</h2>
-          <div className="timeline">
-            <div className="timeline-meta">
-              <span>
-                sol {solCursor ?? "—"} / {solRange.max || "—"}
-              </span>
-              <span className="muted">
-                showing {visibleCameras.length} / {cameras.length}
-              </span>
-            </div>
-            <input
-              type="range"
-              min={solRange.min}
-              max={Math.max(solRange.min, solRange.max)}
-              step={1}
-              value={solCursor ?? solRange.min}
-              disabled={!cameras.length}
-              onChange={(e) => {
-                setPlaying(false);
-                setSolCursor(Number(e.target.value));
-              }}
-            />
-            <div className="timeline-hist" title="Posed cameras per sol (active layers)">
-              {Array.from({ length: Math.max(1, solRange.max - solRange.min + 1) }, (_, i) => {
-                const sol = solRange.min + i;
-                const n = solHistogram.get(sol) || 0;
-                const maxN = Math.max(1, ...solHistogram.values());
-                const h = Math.round((n / maxN) * 100);
-                const active = solCursor != null && sol <= solCursor;
-                return (
-                  <div
-                    key={sol}
-                    className={"hist-bar" + (active ? " on" : "")}
-                    style={{ height: `${Math.max(n ? 8 : 2, h)}%` }}
-                    title={`sol ${sol}: ${n}`}
+          {viewMode === "stop" && (
+            <>
+              <div className="layers">
+                {LAYER_OPTIONS.map((l) => (
+                  <label key={l.id}>
+                    <input
+                      type="checkbox"
+                      checked={!!layers[l.id]}
+                      onChange={(e) =>
+                        setLayers((prev) => ({ ...prev, [l.id]: e.target.checked }))
+                      }
+                    />
+                    {l.id}
+                  </label>
+                ))}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showRays}
+                    onChange={(e) => setShowRays(e.target.checked)}
                   />
-                );
-              })}
-            </div>
-            <div className="timeline-actions">
-              <button type="button" onClick={() => setSolCursor(solRange.min)}>
-                Start
-              </button>
-              <button
-                type="button"
-                onClick={() => setPlaying((p) => !p)}
-                disabled={!cameras.length}
-              >
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button type="button" onClick={() => setSolCursor(solRange.max)}>
-                End
-              </button>
-            </div>
-          </div>
-        </div>
-        <h2>
-          Stereo pairs{" "}
-          <span className="muted">
-            {pairsLoading ? "…" : `${visiblePairs.length}/${pairs.length}`}
-          </span>
-        </h2>
-        <div className="pair-list">
-          {pairsLoading && <div className="empty">Matching L/R pairs…</div>}
-          {!pairsLoading && visiblePairs.length === 0 && (
-            <div className="empty">No stereo pairs for this stop / sol range.</div>
-          )}
-          {visiblePairs.slice(0, 40).map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className={
-                "pair-item" + (selectedPair?.id === p.id ? " active" : "")
-              }
-              onClick={() => onSelectPair(p)}
-            >
-              <div className="title">
-                {p.family} · sol {p.sol ?? "?"} · score {p.score.toFixed(0)}
+                  Rays
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showFrustums}
+                    onChange={(e) => setShowFrustums(e.target.checked)}
+                  />
+                  Frustums
+                </label>
               </div>
-              <div className="meta">
-                baseline{" "}
-                {p.baseline_m != null ? `${p.baseline_m.toFixed(3)} m` : "?"} · Δt{" "}
-                {p.dt_sclk != null ? `${p.dt_sclk.toFixed(1)}s` : "?"} · look Δ{" "}
-                {p.look_angle_deg != null ? `${p.look_angle_deg.toFixed(1)}°` : "?"}
+
+              <h2 style={{ margin: "4px 0 0" }}>Sol timeline</h2>
+              <div className="timeline">
+                <div className="timeline-meta">
+                  <span>
+                    sol {solCursor ?? "—"} / {solRange.max || "—"}
+                  </span>
+                  <span className="muted">
+                    showing {visibleCameras.length} / {cameras.length}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={solRange.min}
+                  max={Math.max(solRange.min, solRange.max)}
+                  step={1}
+                  value={solCursor ?? solRange.min}
+                  disabled={!cameras.length}
+                  onChange={(e) => {
+                    setPlaying(false);
+                    setSolCursor(Number(e.target.value));
+                  }}
+                />
+                <div
+                  className="timeline-hist"
+                  title="Posed cameras per sol (active layers)"
+                >
+                  {Array.from(
+                    { length: Math.max(1, solRange.max - solRange.min + 1) },
+                    (_, i) => {
+                      const sol = solRange.min + i;
+                      const n = solHistogram.get(sol) || 0;
+                      const maxN = Math.max(1, ...solHistogram.values());
+                      const h = Math.round((n / maxN) * 100);
+                      const active = solCursor != null && sol <= solCursor;
+                      return (
+                        <div
+                          key={sol}
+                          className={"hist-bar" + (active ? " on" : "")}
+                          style={{ height: `${Math.max(n ? 8 : 2, h)}%` }}
+                          title={`sol ${sol}: ${n}`}
+                        />
+                      );
+                    }
+                  )}
+                </div>
+                <div className="timeline-actions">
+                  <button type="button" onClick={() => setSolCursor(solRange.min)}>
+                    Start
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPlaying((p) => !p)}
+                    disabled={!cameras.length}
+                  >
+                    {playing ? "Pause" : "Play"}
+                  </button>
+                  <button type="button" onClick={() => setSolCursor(solRange.max)}>
+                    End
+                  </button>
+                </div>
               </div>
-            </button>
-          ))}
-          {pairs.length > 0 && (
-            <button type="button" className="export-btn" onClick={exportPairsJson}>
-              Export pairs JSON
-            </button>
+            </>
+          )}
+          {viewMode === "path" && (
+            <div className="empty" style={{ padding: "8px 0" }}>
+              Each node is a <strong>(site, drive)</strong> stop ordered by sol.
+              Node size ∝ posed images; lateral offset by site.{" "}
+              <strong>Not</strong> real Jezero map coordinates.
+            </div>
           )}
         </div>
+        {viewMode === "stop" && (
+          <>
+            <h2>
+              Stereo pairs{" "}
+              <span className="muted">
+                {pairsLoading ? "…" : `${visiblePairs.length}/${pairs.length}`}
+              </span>
+            </h2>
+            <div className="pair-list">
+              {pairsLoading && <div className="empty">Matching L/R pairs…</div>}
+              {!pairsLoading && visiblePairs.length === 0 && (
+                <div className="empty">
+                  No stereo pairs for this stop / sol range.
+                </div>
+              )}
+              {visiblePairs.slice(0, 40).map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={
+                    "pair-item" + (selectedPair?.id === p.id ? " active" : "")
+                  }
+                  onClick={() => onSelectPair(p)}
+                >
+                  <div className="title">
+                    {p.family} · sol {p.sol ?? "?"} · score {p.score.toFixed(0)}
+                  </div>
+                  <div className="meta">
+                    baseline{" "}
+                    {p.baseline_m != null ? `${p.baseline_m.toFixed(3)} m` : "?"} ·
+                    Δt {p.dt_sclk != null ? `${p.dt_sclk.toFixed(1)}s` : "?"} · look
+                    Δ{" "}
+                    {p.look_angle_deg != null
+                      ? `${p.look_angle_deg.toFixed(1)}°`
+                      : "?"}
+                  </div>
+                </button>
+              ))}
+              {pairs.length > 0 && (
+                <button
+                  type="button"
+                  className="export-btn"
+                  onClick={exportPairsJson}
+                >
+                  Export pairs JSON
+                </button>
+              )}
+            </div>
+          </>
+        )}
 
         <h2>Stops</h2>
         <div className="stop-list">
@@ -437,27 +497,42 @@ export default function App() {
 
       <main className="viewport">
         {error && <div className="status-banner">{error}</div>}
-        {loading && <div className="status-banner">Loading cameras…</div>}
-        <Scene
-          cameras={visibleCameras}
-          selectedId={selected?.imageid ?? null}
-          onSelect={(c) => onSelectCamera(c, true)}
-          showRays={showRays}
-          showFrustums={showFrustums}
-          flyTo={flyTo}
-          flyToken={flyToken}
-          frameToken={frameToken}
-          pairIds={pairIds}
-          pairBaseline={pairBaseline}
-        />
-        <div className="hud">
-          {selectedStop
-            ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
-            : "Select a stop"}
-          <div className="muted">
-            Drag orbit · click points · stereo pairs in teal · Play walks sols
-          </div>
-        </div>
+        {loading && viewMode === "stop" && (
+          <div className="status-banner">Loading cameras…</div>
+        )}
+        {viewMode === "path" ? (
+          <MissionPath
+            stops={filteredStops.length ? filteredStops : stops}
+            selectedStopId={selectedStop?.stop_id ?? null}
+            onSelectStop={(s) => selectStop(s, true)}
+          />
+        ) : (
+          <>
+            <Scene
+              cameras={visibleCameras}
+              selectedId={selected?.imageid ?? null}
+              onSelect={(c) => onSelectCamera(c, true)}
+              showRays={showRays}
+              showFrustums={showFrustums}
+              flyTo={flyTo}
+              flyToken={flyToken}
+              frameToken={frameToken}
+              pairIds={pairIds}
+              pairBaseline={pairBaseline}
+            />
+            <div className="hud">
+              {selectedStop
+                ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
+                : "Select a stop"}
+              <div className="muted">
+                Drag orbit · stereo pairs in teal ·{" "}
+                <button type="button" className="linkish" onClick={openMissionPath}>
+                  ← Mission path
+                </button>
+              </div>
+            </div>
+          </>
+        )}
         <div className="path-strip" title="Mission path (stops ordered by first sol)">
           {pathStops.map((s) => (
             <button
@@ -466,7 +541,7 @@ export default function App() {
               className={
                 "path-chip" + (selectedStop?.stop_id === s.stop_id ? " active" : "")
               }
-              onClick={() => selectStop(s)}
+              onClick={() => selectStop(s, true)}
             >
               <span className="path-sol">s{s.sol_min ?? "?"}</span>
               <span>
