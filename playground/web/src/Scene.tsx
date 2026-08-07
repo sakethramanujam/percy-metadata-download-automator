@@ -52,6 +52,8 @@ function Cameras({
   cameras,
   selectedId,
   hoveredId,
+  pairIds,
+  pairBaseline,
   onSelect,
   onHover,
   showRays,
@@ -60,6 +62,8 @@ function Cameras({
   cameras: Camera[];
   selectedId: string | null;
   hoveredId: string | null;
+  pairIds: Set<string>;
+  pairBaseline: [[number, number, number], [number, number, number]] | null;
   onSelect: (c: Camera) => void;
   onHover: (c: Camera | null) => void;
   showRays: boolean;
@@ -74,18 +78,26 @@ function Cameras({
       arr[i * 3 + 1] = p.y;
       arr[i * 3 + 2] = p.z;
       const isSel = c.imageid === selectedId;
+      const isPair = pairIds.has(c.imageid);
       const isHov = c.imageid === hoveredId;
       const col = new THREE.Color(
-        isSel ? "#e8a838" : isHov ? "#ffffff" : colorFor(c.instrument)
+        isSel
+          ? "#e8a838"
+          : isPair
+            ? "#4db6ac"
+            : isHov
+              ? "#ffffff"
+              : colorFor(c.instrument)
       );
       colors[i * 3] = col.r;
       colors[i * 3 + 1] = col.g;
       colors[i * 3 + 2] = col.b;
     });
     return { arr, colors };
-  }, [cameras, selectedId, hoveredId]);
+  }, [cameras, selectedId, hoveredId, pairIds]);
 
   const selected = cameras.find((c) => c.imageid === selectedId) || null;
+  const pairCams = cameras.filter((c) => pairIds.has(c.imageid));
 
   const rayCams = useMemo(() => {
     if (!showRays) return [] as Camera[];
@@ -143,9 +155,28 @@ function Cameras({
       {selected && selected.pos_x != null && (
         <SelectedFrustum camera={selected} emphasis />
       )}
+      {pairCams.map((c) =>
+        c.imageid !== selectedId && c.pos_x != null ? (
+          <SelectedFrustum key={c.imageid + "-pair-f"} camera={c} emphasis color="#4db6ac" />
+        ) : null
+      )}
+      {pairBaseline && (
+        <Line
+          points={pairBaseline}
+          color="#4db6ac"
+          lineWidth={3}
+          transparent
+          opacity={0.95}
+        />
+      )}
       {showFrustums &&
         cameras
-          .filter((c) => c.imageid !== selectedId && c.pos_x != null)
+          .filter(
+            (c) =>
+              c.imageid !== selectedId &&
+              !pairIds.has(c.imageid) &&
+              c.pos_x != null
+          )
           .slice(0, 36)
           .map((c) => (
             <SelectedFrustum key={c.imageid + "-f"} camera={c} emphasis={false} />
@@ -175,9 +206,11 @@ function HoverLabel({ camera }: { camera: Camera }) {
 function SelectedFrustum({
   camera,
   emphasis,
+  color: colorOverride,
 }: {
   camera: Camera;
   emphasis: boolean;
+  color?: string;
 }) {
   const origin = toThree(camera);
   const look = lookThree(camera);
@@ -226,8 +259,9 @@ function SelectedFrustum({
     ],
   ];
 
-  const color = emphasis ? "#e8a838" : colorFor(camera.instrument);
-  const opacity = emphasis ? 1 : 0.22;
+  const color =
+    colorOverride || (emphasis ? "#e8a838" : colorFor(camera.instrument));
+  const opacity = emphasis || colorOverride ? 1 : 0.22;
 
   return (
     <group>
@@ -236,22 +270,24 @@ function SelectedFrustum({
           key={i}
           points={pts}
           color={color}
-          lineWidth={emphasis ? 2 : 1}
+          lineWidth={emphasis || colorOverride ? 2 : 1}
           transparent
           opacity={opacity}
         />
       ))}
-      {emphasis && (
+      {(emphasis || colorOverride) && (
         <>
           <mesh position={origin}>
             <sphereGeometry args={[0.035, 16, 16]} />
-            <meshBasicMaterial color="#e8a838" />
+            <meshBasicMaterial color={color} />
           </mesh>
-          <Html position={[origin.x, origin.y + 0.1, origin.z]} center>
-            <div className="scene-label scene-label-active">
-              {camera.instrument} · sol {camera.sol ?? "?"}
-            </div>
-          </Html>
+          {emphasis && (
+            <Html position={[origin.x, origin.y + 0.1, origin.z]} center>
+              <div className="scene-label scene-label-active">
+                {camera.instrument} · sol {camera.sol ?? "?"}
+              </div>
+            </Html>
+          )}
         </>
       )}
     </group>
@@ -374,6 +410,8 @@ export default function Scene({
   flyTo,
   flyToken,
   frameToken,
+  pairIds,
+  pairBaseline,
 }: {
   cameras: Camera[];
   selectedId: string | null;
@@ -383,8 +421,11 @@ export default function Scene({
   flyTo: Camera | null;
   flyToken: number;
   frameToken: string;
+  pairIds?: Set<string>;
+  pairBaseline?: [[number, number, number], [number, number, number]] | null;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const pairSet = pairIds ?? new Set<string>();
 
   return (
     <Canvas
@@ -400,6 +441,8 @@ export default function Scene({
         cameras={cameras}
         selectedId={selectedId}
         hoveredId={hoveredId}
+        pairIds={pairSet}
+        pairBaseline={pairBaseline ?? null}
         onSelect={onSelect}
         onHover={(c) => setHoveredId(c?.imageid ?? null)}
         showRays={showRays}

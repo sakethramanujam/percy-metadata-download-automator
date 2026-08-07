@@ -93,3 +93,41 @@ export function fetchStats() {
     instruments: Record<string, number>;
   }>("/api/stats");
 }
+
+export type StereoPair = {
+  id: string;
+  sol: number | null;
+  family: string;
+  left_imageid: string;
+  right_imageid: string;
+  left_instrument: string;
+  right_instrument: string;
+  left_filter: string;
+  right_filter: string;
+  score: number;
+  baseline_m: number | null;
+  dt_sclk: number | null;
+  look_angle_deg: number | null;
+  left_pos: [number, number, number] | null;
+  right_pos: [number, number, number] | null;
+  left_look: [number, number, number] | null;
+  right_look: [number, number, number] | null;
+};
+
+export function fetchStereoPairs(
+  site: number,
+  drive: number,
+  opts?: { sol_min?: number; sol_max?: number; max_pairs?: number }
+) {
+  const params = new URLSearchParams({
+    max_pairs: String(opts?.max_pairs ?? 80),
+  });
+  if (opts?.sol_min != null) params.set("sol_min", String(opts.sol_min));
+  if (opts?.sol_max != null) params.set("sol_max", String(opts.sol_max));
+  return getJson<{
+    site: number;
+    drive: number;
+    n_pairs: number;
+    pairs: StereoPair[];
+  }>(`/api/stops/${site}/${drive}/stereo-pairs?${params}`);
+}

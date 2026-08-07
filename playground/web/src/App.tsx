@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
 import {
   Camera,
+  StereoPair,
   Stop,
   fetchCameras,
   fetchHealth,
   fetchImage,
   fetchStats,
+  fetchStereoPairs,
   fetchStops,
   thumbUrl,
 } from "./api";
@@ -45,6 +47,11 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const playRef = useRef<number | null>(null);
 
+  // Stereo pairs
+  const [pairs, setPairs] = useState<StereoPair[]>([]);
+  const [selectedPair, setSelectedPair] = useState<StereoPair | null>(null);
+  const [pairsLoading, setPairsLoading] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
@@ -82,6 +89,8 @@ export default function App() {
     setDetail(null);
     setFlyTo(null);
     setPlaying(false);
+    setSelectedPair(null);
+    setPairs([]);
     fetchCameras(selectedStop.site, selectedStop.drive)
       .then((r) => {
         setCameras(r.cameras);
@@ -96,6 +105,12 @@ export default function App() {
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
+
+    setPairsLoading(true);
+    fetchStereoPairs(selectedStop.site, selectedStop.drive, { max_pairs: 100 })
+      .then((r) => setPairs(r.pairs))
+      .catch(() => setPairs([]))
+      .finally(() => setPairsLoading(false));
   }, [selectedStop]);
 
   const solRange = useMemo(() => {
@@ -171,8 +186,37 @@ export default function App() {
 
   const frameToken = `${selectedStop?.stop_id ?? "none"}:${cameras.length}`;
 
+  const visiblePairs = useMemo(() => {
+    if (solCursor == null) return pairs;
+    return pairs.filter((p) => p.sol == null || p.sol <= solCursor);
+  }, [pairs, solCursor]);
+
+  const pairIds = useMemo(() => {
+    const s = new Set<string>();
+    if (!selectedPair) return s;
+    s.add(selectedPair.left_imageid);
+    s.add(selectedPair.right_imageid);
+    return s;
+  }, [selectedPair]);
+
+  const pairBaseline = useMemo(() => {
+    if (!selectedPair?.left_pos || !selectedPair?.right_pos) return null;
+    // NASA (x,y,z) → Three (x,z,y)
+    const [lx, ly, lz] = selectedPair.left_pos;
+    const [rx, ry, rz] = selectedPair.right_pos;
+    return [
+      [lx, lz, ly] as [number, number, number],
+      [rx, rz, ry] as [number, number, number],
+    ] as [[number, number, number], [number, number, number]];
+  }, [selectedPair]);
+
   async function onSelectCamera(c: Camera, fly = false) {
     setSelected(c);
+    // If this camera belongs to a pair, select that pair
+    const hit = pairs.find(
+      (p) => p.left_imageid === c.imageid || p.right_imageid === c.imageid
+    );
+    if (hit) setSelectedPair(hit);
     if (fly) {
       setFlyTo(c);
       setFlyToken((t) => t + 1);
@@ -183,6 +227,33 @@ export default function App() {
     } catch {
       setDetail(c);
     }
+  }
+
+  function onSelectPair(p: StereoPair) {
+    setSelectedPair(p);
+    const left = cameras.find((c) => c.imageid === p.left_imageid);
+    const right = cameras.find((c) => c.imageid === p.right_imageid);
+    const cam = left || right;
+    if (cam) {
+      setSelected(cam);
+      setFlyTo(cam);
+      setFlyToken((t) => t + 1);
+      fetchImage(cam.imageid)
+        .then((d) => setDetail(d as Camera))
+        .catch(() => setDetail(cam));
+    }
+  }
+
+  function exportPairsJson() {
+    const blob = new Blob([JSON.stringify({ pairs: visiblePairs }, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `stereo-pairs-${selectedStop?.stop_id ?? "stop"}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function flyToSelected() {
@@ -296,6 +367,44 @@ export default function App() {
             </div>
           </div>
         </div>
+        <h2>
+          Stereo pairs{" "}
+          <span className="muted">
+            {pairsLoading ? "…" : `${visiblePairs.length}/${pairs.length}`}
+          </span>
+        </h2>
+        <div className="pair-list">
+          {pairsLoading && <div className="empty">Matching L/R pairs…</div>}
+          {!pairsLoading && visiblePairs.length === 0 && (
+            <div className="empty">No stereo pairs for this stop / sol range.</div>
+          )}
+          {visiblePairs.slice(0, 40).map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className={
+                "pair-item" + (selectedPair?.id === p.id ? " active" : "")
+              }
+              onClick={() => onSelectPair(p)}
+            >
+              <div className="title">
+                {p.family} · sol {p.sol ?? "?"} · score {p.score.toFixed(0)}
+              </div>
+              <div className="meta">
+                baseline{" "}
+                {p.baseline_m != null ? `${p.baseline_m.toFixed(3)} m` : "?"} · Δt{" "}
+                {p.dt_sclk != null ? `${p.dt_sclk.toFixed(1)}s` : "?"} · look Δ{" "}
+                {p.look_angle_deg != null ? `${p.look_angle_deg.toFixed(1)}°` : "?"}
+              </div>
+            </button>
+          ))}
+          {pairs.length > 0 && (
+            <button type="button" className="export-btn" onClick={exportPairsJson}>
+              Export pairs JSON
+            </button>
+          )}
+        </div>
+
         <h2>Stops</h2>
         <div className="stop-list">
           {filteredStops.length === 0 && (
@@ -338,13 +447,15 @@ export default function App() {
           flyTo={flyTo}
           flyToken={flyToken}
           frameToken={frameToken}
+          pairIds={pairIds}
+          pairBaseline={pairBaseline}
         />
         <div className="hud">
           {selectedStop
-            ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cameras`
+            ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
             : "Select a stop"}
           <div className="muted">
-            Drag orbit · scroll zoom · hover / click points · Play walks sols
+            Drag orbit · click points · stereo pairs in teal · Play walks sols
           </div>
         </div>
         <div className="path-strip" title="Mission path (stops ordered by first sol)">
@@ -377,16 +488,52 @@ export default function App() {
               time.
             </div>
           )}
+          {selectedPair && (
+            <div className="stereo-panel">
+              <div className="stereo-title">
+                Stereo · {selectedPair.family} · sol {selectedPair.sol ?? "?"} ·
+                score {selectedPair.score.toFixed(0)}
+              </div>
+              <div className="stereo-pair">
+                <div>
+                  <div className="muted">L · {selectedPair.left_instrument}</div>
+                  <img
+                    src={thumbUrl(selectedPair.left_imageid, "small")}
+                    alt={selectedPair.left_imageid}
+                  />
+                </div>
+                <div>
+                  <div className="muted">R · {selectedPair.right_instrument}</div>
+                  <img
+                    src={thumbUrl(selectedPair.right_imageid, "small")}
+                    alt={selectedPair.right_imageid}
+                  />
+                </div>
+              </div>
+              <div className="meta" style={{ marginTop: 6 }}>
+                baseline{" "}
+                {selectedPair.baseline_m != null
+                  ? `${selectedPair.baseline_m.toFixed(3)} m`
+                  : "?"}{" "}
+                · Δt{" "}
+                {selectedPair.dt_sclk != null
+                  ? `${selectedPair.dt_sclk.toFixed(2)} s`
+                  : "?"}
+              </div>
+            </div>
+          )}
           {selected && (
             <>
-              <img
-                key={selected.imageid}
-                src={thumbUrl(selected.imageid, "small")}
-                alt={selected.imageid}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.opacity = "0.3";
-                }}
-              />
+              {!selectedPair && (
+                <img
+                  key={selected.imageid}
+                  src={thumbUrl(selected.imageid, "small")}
+                  alt={selected.imageid}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.opacity = "0.3";
+                  }}
+                />
+              )}
               <div className="inspector-actions">
                 <button type="button" onClick={flyToSelected}>
                   Fly to camera
