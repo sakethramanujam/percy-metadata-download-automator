@@ -13,6 +13,43 @@ export type Stop = {
   n_navcam: number;
   n_mcz: number;
   n_stereo_capable: number;
+  // MMGIS join (optional)
+  lon?: number | null;
+  lat?: number | null;
+  elev_geoid?: number | null;
+  easting?: number | null;
+  northing?: number | null;
+  yaw_deg?: number | null;
+  dist_total_m?: number | null;
+  rmc?: string | null;
+  pano_url?: string | null;
+};
+
+export type MapWaypoint = {
+  rmc: string | null;
+  site: number | null;
+  drive: number | null;
+  sol: number | null;
+  lon: number | null;
+  lat: number | null;
+  elev_geoid: number | null;
+  easting: number | null;
+  northing: number | null;
+  yaw_deg: number | null;
+  dist_total_m: number | null;
+  stop_id: string | null;
+  pano_url?: string | null;
+  pano_is_panoramic?: boolean;
+  note?: string | null;
+};
+
+export type TraverseSegment = {
+  segment_id: number;
+  sol: number | null;
+  from_rmc: string;
+  to_rmc: string;
+  length_m: number | null;
+  coordinates: number[][];
 };
 
 export type Camera = {
@@ -116,6 +153,27 @@ export type StereoPair = {
   left_look: [number, number, number] | null;
   right_look: [number, number, number] | null;
 };
+
+export function fetchMap() {
+  return getJson<{
+    available: boolean;
+    n_waypoints: number;
+    n_traverse_segments: number;
+    n_stops: number;
+    n_stops_with_map: number;
+    waypoints: MapWaypoint[];
+    traverse: TraverseSegment[];
+    current?: {
+      site?: number;
+      drive?: number;
+      sol?: number;
+      lon?: number;
+      lat?: number;
+      dist_total_m?: number;
+    } | null;
+    manifest?: Record<string, unknown>;
+  }>("/api/map");
+}
 
 export function fetchStereoPairs(
   site: number,

@@ -4,11 +4,13 @@ import MissionPath from "./MissionPath";
 import EyeView from "./EyeView";
 import {
   Camera,
+  MapWaypoint,
   StereoPair,
   Stop,
   fetchCameras,
   fetchHealth,
   fetchImage,
+  fetchMap,
   fetchStats,
   fetchStereoPairs,
   fetchStops,
@@ -60,6 +62,11 @@ export default function App() {
   // First-person rover eye view
   const [eyeMode, setEyeMode] = useState(false);
 
+  // NASA MMGIS map localization
+  const [waypoints, setWaypoints] = useState<MapWaypoint[]>([]);
+  const [mapAvailable, setMapAvailable] = useState(false);
+  const [mapStats, setMapStats] = useState("");
+
   useEffect(() => {
     (async () => {
       try {
@@ -85,6 +92,25 @@ export default function App() {
         const best = [...ordered].sort((a, b) => b.n_posed - a.n_posed)[0];
         if (best) setSelectedStop(best);
         setViewMode("path");
+
+        try {
+          const m = await fetchMap();
+          setMapAvailable(m.available);
+          setWaypoints(m.waypoints || []);
+          const cur = m.current;
+          setMapStats(
+            m.available
+              ? `Map: ${m.n_waypoints} waypoints · ${m.n_stops_with_map}/${m.n_stops} stops joined` +
+                  (cur?.sol != null ? ` · rover sol ${cur.sol}` : "") +
+                  (cur?.dist_total_m != null
+                    ? ` · ${(cur.dist_total_m / 1000).toFixed(1)} km`
+                    : "")
+              : "Map: not loaded (run python -m playground.pipeline.fetch_mmgis)"
+          );
+        } catch {
+          setMapAvailable(false);
+          setMapStats("Map: unavailable");
+        }
       } catch (e) {
         setError(String(e));
       }
@@ -324,6 +350,7 @@ export default function App() {
         <div className="toolbar">
           <div className="muted">{health || "Connecting…"}</div>
           <div className="muted">{stats}</div>
+          <div className="muted">{mapStats}</div>
           <div className="view-toggle">
             <button
               type="button"
@@ -539,6 +566,8 @@ export default function App() {
         {viewMode === "path" ? (
           <MissionPath
             stops={filteredStops.length ? filteredStops : stops}
+            waypoints={waypoints}
+            mapAvailable={mapAvailable}
             selectedStopId={selectedStop?.stop_id ?? null}
             onSelectStop={(s) => selectStop(s, true)}
           />
