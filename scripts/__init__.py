@@ -1,0 +1,1 @@
+"""Percy metadata automation scripts."""

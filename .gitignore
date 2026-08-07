@@ -1,0 +1,32 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data / downloads / logs
+data/
+logs/
+*.csv
+!scripts/*_metadata.csv
+
+# Kaggle upload staging (keep metadata JSON)
+kaggle_dataset/*
+!kaggle_dataset/dataset-metadata.json
+
+# State / env / secrets
+.env
+.env.*
+percy_metadata_state.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

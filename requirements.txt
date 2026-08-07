@@ -1,0 +1,7 @@
+# Core (metadata downloader)
+pandas>=2.0,<3
+requests>=2.31,<3
+tqdm>=4.66,<5
+
+# Kaggle CLI (daily dataset publish)
+kaggle>=2.0,<3

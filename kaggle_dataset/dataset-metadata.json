@@ -1,0 +1,10 @@
+{
+  "title": "Mars2020-Image-Catalogue",
+  "id": "sakethramanujam/mars2020imagecatalogue",
+  "licenses": [{"name": "CC0-1.0"}],
+  "subtitle": "List of all Images from NASA/JPL Website",
+  "description": "### Context\n\nThis is a list of all images available on NASA/JPL's website for Mission Mars 2020 (Perseverance).\n\n### Content\n\nMetadata for raw images as listed at [NASA Mars 2020 raw images](https://mars.nasa.gov/mars2020/multimedia/raw-images/).\n\nUpdated daily from the public NASA RSS/JSON feed.\n\n### Acknowledgements\n\nThe maintainer of this dataset does not own this data.\nAll data is accredited to: NASA/Caltech-JPL/ASU (Mastcam-Z) and other Mars 2020 instrument teams.",
+  "keywords": ["geology", "astronomy", "engineering", "image", "space"],
+  "expectedUpdateFrequency": "daily",
+  "userSpecifiedSources": "https://mars.nasa.gov/mars2020/multimedia/raw-images/"
+}
