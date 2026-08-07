@@ -42,20 +42,34 @@ Writes:
 
 ```bash
 source .venv/bin/activate
-uvicorn playground.api.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn playground.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Health: http://127.0.0.1:8000/api/health
+Health: http://127.0.0.1:8000/api/health (also via your LAN IP)
 
 ## 3. Run web UI
 
 ```bash
 cd playground/web
 npm install
-npm run dev
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Open http://localhost:5173 — Vite proxies `/api` to the backend.
+Open:
+
+- http://localhost:5173
+- http://&lt;machine-ip&gt;:5173 from another device on the LAN
+
+Vite proxies `/api` to the backend on this machine.
+
+## UI features (v1 + polish)
+
+- Stop list + bottom **path strip** (stops ordered by first sol)
+- Instrument **layers** (NAVCAM / MCZ / HAZCAM / OTHER)
+- **Sol timeline** slider with histogram, Play/Pause progressive reveal
+- 3D poses, look **rays**, optional multi **frustums**
+- Hover labels, click to select, **Fly to camera**
+- Inspector with proxied NASA thumbnail
 
 ## Coordinate model
 
