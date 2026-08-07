@@ -21,22 +21,25 @@ pip install -r requirements.txt
 
 Node 18+ for the web UI.
 
-## 1. Build the index
+## 1. Build the index + NASA map layers
 
 ```bash
 source .venv/bin/activate
 # uses data/full-metadata.csv by default
 python -m playground.pipeline.build_index
 
-# faster dev subset:
-# python -m playground.pipeline.build_index --max-rows 30000
+# NASA MMGIS localization (real Jezero waypoints + traverse)
+python -m playground.pipeline.fetch_mmgis
+
+# or: make data
 ```
 
 Writes:
 
 - `data/derived/images.parquet`
-- `data/derived/stops.parquet`
-- `data/derived/manifest.json`
+- `data/derived/stops.parquet` (enriched with lon/lat/easting after map fetch)
+- `data/derived/waypoints.parquet`, `traverse.parquet`
+- `data/derived/manifest.json`, `mmgis_manifest.json`
 
 ## 2. Run API
 
