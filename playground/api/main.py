@@ -15,7 +15,10 @@ from playground.api.data import (
     cameras_for_stop,
     get_image,
     list_stops,
+    list_traverse_segments,
+    list_waypoints,
     load_manifest,
+    map_bundle,
     reload_indexes,
     stats,
     stereo_pairs_for_stop,
@@ -66,11 +69,61 @@ def api_stops(
     sol_min: Optional[int] = None,
     sol_max: Optional[int] = None,
     min_images: int = Query(0, ge=0),
+    map_only: bool = False,
 ):
     try:
-        return {"stops": list_stops(sol_min=sol_min, sol_max=sol_max, min_images=min_images)}
+        return {
+            "stops": list_stops(
+                sol_min=sol_min,
+                sol_max=sol_max,
+                min_images=min_images,
+                map_only=map_only,
+            )
+        }
     except IndexNotBuiltError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.get("/api/map")
+def api_map():
+    """NASA MMGIS waypoints + traverse (real Jezero localization)."""
+    try:
+        # stops index optional but preferred for join counts
+        try:
+            load_manifest()
+        except IndexNotBuiltError:
+            pass
+        return map_bundle()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/map/waypoints")
+def api_waypoints(
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+):
+    wps = list_waypoints(sol_min=sol_min, sol_max=sol_max)
+    if not wps:
+        raise HTTPException(
+            status_code=503,
+            detail="No waypoints. Run: python -m playground.pipeline.fetch_mmgis",
+        )
+    return {"waypoints": wps, "n": len(wps)}
+
+
+@app.get("/api/map/traverse")
+def api_traverse(
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+):
+    segs = list_traverse_segments(sol_min=sol_min, sol_max=sol_max)
+    if not segs:
+        raise HTTPException(
+            status_code=503,
+            detail="No traverse. Run: python -m playground.pipeline.fetch_mmgis",
+        )
+    return {"segments": segs, "n": len(segs)}
 
 
 @app.get("/api/stops/{site}/{drive}/cameras")

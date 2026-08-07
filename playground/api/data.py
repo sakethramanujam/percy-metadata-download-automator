@@ -43,16 +43,72 @@ def load_images() -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+@lru_cache(maxsize=1)
+def load_waypoints() -> pd.DataFrame:
+    path = config.DERIVED_DIR / "waypoints.parquet"
+    if not path.is_file():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+@lru_cache(maxsize=1)
+def load_traverse() -> pd.DataFrame:
+    path = config.DERIVED_DIR / "traverse.parquet"
+    if not path.is_file():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+@lru_cache(maxsize=1)
+def load_mmgis_manifest() -> dict[str, Any]:
+    path = config.DERIVED_DIR / "mmgis_manifest.json"
+    if not path.is_file():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def reload_indexes() -> None:
     load_manifest.cache_clear()
     load_stops.cache_clear()
     load_images.cache_clear()
+    load_waypoints.cache_clear()
+    load_traverse.cache_clear()
+    load_mmgis_manifest.cache_clear()
+
+
+def _records_from_df(df: pd.DataFrame) -> list[dict[str, Any]]:
+    records = []
+    for row in df.to_dict(orient="records"):
+        if "instruments_json" in row:
+            try:
+                row["instruments"] = json.loads(row.pop("instruments_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                row["instruments"] = {}
+                row.pop("instruments_json", None)
+        if "coordinates_json" in row:
+            try:
+                row["coordinates"] = json.loads(row.pop("coordinates_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                row["coordinates"] = []
+                row.pop("coordinates_json", None)
+        for k, v in list(row.items()):
+            if pd.isna(v) if not isinstance(v, (list, dict)) else False:
+                row[k] = None
+            elif hasattr(v, "item"):  # numpy scalars
+                try:
+                    row[k] = v.item()
+                except Exception:
+                    pass
+        records.append(row)
+    return records
 
 
 def list_stops(
     sol_min: Optional[int] = None,
     sol_max: Optional[int] = None,
     min_images: int = 0,
+    map_only: bool = False,
 ) -> list[dict[str, Any]]:
     df = load_stops().copy()
     if sol_min is not None:
@@ -61,20 +117,59 @@ def list_stops(
         df = df[df["sol_min"].fillna(10**9) <= sol_max]
     if min_images:
         df = df[df["n_images"] >= min_images]
-    records = []
-    for row in df.to_dict(orient="records"):
-        # parse instruments_json for API consumers
-        try:
-            row["instruments"] = json.loads(row.pop("instruments_json", "{}") or "{}")
-        except json.JSONDecodeError:
-            row["instruments"] = {}
-            row.pop("instruments_json", None)
-        # JSON-safe NA
-        for k, v in list(row.items()):
-            if pd.isna(v):
-                row[k] = None
-        records.append(row)
-    return records
+    if map_only and "lon" in df.columns:
+        df = df[df["lon"].notna()]
+    return _records_from_df(df)
+
+
+def list_waypoints(
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    df = load_waypoints()
+    if df.empty:
+        return []
+    df = df.copy()
+    if sol_min is not None:
+        df = df[df["sol"].fillna(-1) >= sol_min]
+    if sol_max is not None:
+        df = df[df["sol"].fillna(10**9) <= sol_max]
+    return _records_from_df(df)
+
+
+def list_traverse_segments(
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    df = load_traverse()
+    if df.empty:
+        return []
+    df = df.copy()
+    if sol_min is not None:
+        df = df[df["sol"].fillna(-1) >= sol_min]
+    if sol_max is not None:
+        df = df[df["sol"].fillna(10**9) <= sol_max]
+    return _records_from_df(df)
+
+
+def map_bundle() -> dict[str, Any]:
+    """Waypoints + traverse + current + join stats for the mission path UI."""
+    mm = load_mmgis_manifest()
+    waypoints = list_waypoints()
+    traverse = list_traverse_segments()
+    stops = list_stops(min_images=0)
+    n_mapped = sum(1 for s in stops if s.get("lon") is not None)
+    return {
+        "available": bool(waypoints),
+        "manifest": mm,
+        "n_waypoints": len(waypoints),
+        "n_traverse_segments": len(traverse),
+        "n_stops": len(stops),
+        "n_stops_with_map": n_mapped,
+        "waypoints": waypoints,
+        "traverse": traverse,
+        "current": mm.get("current"),
+    }
 
 
 def cameras_for_stop(
