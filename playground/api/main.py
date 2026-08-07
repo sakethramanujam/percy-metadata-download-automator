@@ -26,10 +26,12 @@ app = FastAPI(
     description="Query derived Mars 2020 image poses for the local 3D playground.",
 )
 
+# Local playground: allow LAN access via machine IP (Vite proxy + direct API).
+_cors_origins = config.cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[config.CORS_ORIGIN, "http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_credentials=True,
+    allow_origins=_cors_origins if _cors_origins != ["*"] else ["*"],
+    allow_credentials=_cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
