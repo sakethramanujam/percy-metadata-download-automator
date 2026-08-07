@@ -469,6 +469,89 @@ button.linkish {
   pointer-events: auto;
 }
 
+.eye-view {
+  position: absolute;
+  inset: 0 0 52px 0;
+  z-index: 5;
+  background: #05080c;
+}
+
+.eye-view canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.eye-chrome {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: linear-gradient(180deg, rgba(8, 12, 18, 0.92), transparent);
+  pointer-events: none;
+}
+
+.eye-chrome.bottom {
+  bottom: 0;
+  top: auto;
+  background: linear-gradient(0deg, rgba(8, 12, 18, 0.94), transparent);
+}
+
+.eye-chrome button {
+  pointer-events: auto;
+  cursor: pointer;
+  background: linear-gradient(180deg, #2a3545, #1a2330);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.eye-chrome button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.eye-chrome button:not(:disabled):hover {
+  border-color: var(--accent);
+}
+
+.eye-hint {
+  pointer-events: none;
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+.eye-meta {
+  position: absolute;
+  left: 12px;
+  bottom: 56px;
+  z-index: 6;
+  max-width: min(420px, 80%);
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(10, 14, 20, 0.8);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+.inspector-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.inspector-actions button {
+  flex: 1;
+}
+
 .inspector {
   padding: 0 16px 16px;
   overflow: auto;

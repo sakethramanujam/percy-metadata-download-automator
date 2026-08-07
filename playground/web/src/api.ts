@@ -73,7 +73,10 @@ export function fetchImage(imageid: string) {
   return getJson<Camera & Record<string, unknown>>(`/api/images/${encodeURIComponent(imageid)}`);
 }
 
-export function thumbUrl(imageid: string, size: "small" | "medium" = "small") {
+export function thumbUrl(
+  imageid: string,
+  size: "small" | "medium" | "large" | "full" = "small"
+) {
   return `/api/images/${encodeURIComponent(imageid)}/thumb?size=${size}`;
 }
 

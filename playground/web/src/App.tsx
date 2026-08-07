@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
 import MissionPath from "./MissionPath";
+import EyeView from "./EyeView";
 import {
   Camera,
   StereoPair,
@@ -56,6 +57,9 @@ export default function App() {
   const [selectedPair, setSelectedPair] = useState<StereoPair | null>(null);
   const [pairsLoading, setPairsLoading] = useState(false);
 
+  // First-person rover eye view
+  const [eyeMode, setEyeMode] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
@@ -98,6 +102,7 @@ export default function App() {
     setPlaying(false);
     setSelectedPair(null);
     setPairs([]);
+    setEyeMode(false);
     fetchCameras(selectedStop.site, selectedStop.drive)
       .then((r) => {
         setCameras(r.cameras);
@@ -217,23 +222,53 @@ export default function App() {
     ] as [[number, number, number], [number, number, number]];
   }, [selectedPair]);
 
-  async function onSelectCamera(c: Camera, fly = false) {
+  const eyePlaylist = useMemo(() => {
+    // Chronological list of currently visible posed cameras for next/prev
+    return [...visibleCameras].sort((a, b) => {
+      const sa = a.sol ?? 0;
+      const sb = b.sol ?? 0;
+      if (sa !== sb) return sa - sb;
+      return String(a.imageid).localeCompare(String(b.imageid));
+    });
+  }, [visibleCameras]);
+
+  const eyeIndex = useMemo(() => {
+    if (!selected) return -1;
+    return eyePlaylist.findIndex((c) => c.imageid === selected.imageid);
+  }, [eyePlaylist, selected]);
+
+  async function onSelectCamera(c: Camera, fly = false, enterEye = false) {
     setSelected(c);
     // If this camera belongs to a pair, select that pair
     const hit = pairs.find(
       (p) => p.left_imageid === c.imageid || p.right_imageid === c.imageid
     );
     if (hit) setSelectedPair(hit);
-    if (fly) {
+    if (fly && !enterEye) {
       setFlyTo(c);
       setFlyToken((t) => t + 1);
     }
+    if (enterEye) setEyeMode(true);
     try {
       const d = await fetchImage(c.imageid);
       setDetail(d as Camera);
     } catch {
       setDetail(c);
     }
+  }
+
+  function enterEyeView() {
+    if (!selected || selected.pos_x == null) return;
+    setEyeMode(true);
+  }
+
+  function eyeStep(delta: number) {
+    if (eyePlaylist.length === 0) return;
+    let idx = eyeIndex;
+    if (idx < 0) idx = 0;
+    const next = Math.max(0, Math.min(eyePlaylist.length - 1, idx + delta));
+    const cam = eyePlaylist[next];
+    if (cam) onSelectCamera(cam, false, true);
   }
 
   function onSelectPair(p: StereoPair) {
@@ -277,6 +312,7 @@ export default function App() {
   function openMissionPath() {
     setViewMode("path");
     setPlaying(false);
+    setEyeMode(false);
   }
 
   const pathStops = useMemo(() => stops.slice(0, 200), [stops]);
@@ -506,6 +542,21 @@ export default function App() {
             selectedStopId={selectedStop?.stop_id ?? null}
             onSelectStop={(s) => selectStop(s, true)}
           />
+        ) : eyeMode && selected && selected.pos_x != null ? (
+          <EyeView
+            camera={selected}
+            imageSize="medium"
+            onClose={() => setEyeMode(false)}
+            onPrev={() => eyeStep(-1)}
+            onNext={() => eyeStep(1)}
+            hasPrev={eyeIndex > 0}
+            hasNext={eyeIndex >= 0 && eyeIndex < eyePlaylist.length - 1}
+            indexLabel={
+              eyeIndex >= 0
+                ? `${eyeIndex + 1} / ${eyePlaylist.length}`
+                : `1 / ${eyePlaylist.length}`
+            }
+          />
         ) : (
           <>
             <Scene
@@ -525,7 +576,16 @@ export default function App() {
                 ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
                 : "Select a stop"}
               <div className="muted">
-                Drag orbit · stereo pairs in teal ·{" "}
+                Click a camera · then{" "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={!selected || selected.pos_x == null}
+                  onClick={enterEyeView}
+                >
+                  Rover eye view
+                </button>
+                {" · "}
                 <button type="button" className="linkish" onClick={openMissionPath}>
                   ← Mission path
                 </button>
@@ -610,6 +670,14 @@ export default function App() {
                 />
               )}
               <div className="inspector-actions">
+                <button
+                  type="button"
+                  onClick={enterEyeView}
+                  disabled={selected.pos_x == null}
+                  title="First-person view through this image"
+                >
+                  Rover eye view
+                </button>
                 <button type="button" onClick={flyToSelected}>
                   Fly to camera
                 </button>
