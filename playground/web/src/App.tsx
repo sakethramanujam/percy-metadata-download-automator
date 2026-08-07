@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
 import {
   Camera,
@@ -34,10 +34,16 @@ export default function App() {
     OTHER: false,
   });
   const [showRays, setShowRays] = useState(true);
-  const [solMin, setSolMin] = useState<string>("");
-  const [solMax, setSolMax] = useState<string>("");
+  const [showFrustums, setShowFrustums] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flyToken, setFlyToken] = useState(0);
+  const [flyTo, setFlyTo] = useState<Camera | null>(null);
+
+  // Timeline: progressive reveal up to solCursor within stop sol range
+  const [solCursor, setSolCursor] = useState<number | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const playRef = useRef<number | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -49,12 +55,18 @@ export default function App() {
         }
         setHealth(`Index ready · ${h.n_images?.toLocaleString() ?? "?"} images`);
         const [s, st] = await Promise.all([fetchStops(), fetchStats()]);
-        setStops(s.stops);
+        // Chronological path order
+        const ordered = [...s.stops].sort((a, b) => {
+          const sa = a.sol_min ?? 1e9;
+          const sb = b.sol_min ?? 1e9;
+          if (sa !== sb) return sa - sb;
+          return (a.site ?? 0) - (b.site ?? 0) || (a.drive ?? 0) - (b.drive ?? 0);
+        });
+        setStops(ordered);
         setStats(
           `${st.n_stops} stops · ${st.n_posed.toLocaleString()} posed / ${st.n_images.toLocaleString()} images · sols ${st.sol_min ?? "?"}–${st.sol_max ?? "?"}`
         );
-        // auto-select densest posed stop
-        const best = [...s.stops].sort((a, b) => b.n_posed - a.n_posed)[0];
+        const best = [...ordered].sort((a, b) => b.n_posed - a.n_posed)[0];
         if (best) setSelectedStop(best);
       } catch (e) {
         setError(String(e));
@@ -68,11 +80,58 @@ export default function App() {
     setError(null);
     setSelected(null);
     setDetail(null);
+    setFlyTo(null);
+    setPlaying(false);
     fetchCameras(selectedStop.site, selectedStop.drive)
-      .then((r) => setCameras(r.cameras))
+      .then((r) => {
+        setCameras(r.cameras);
+        const sols = r.cameras
+          .map((c) => c.sol)
+          .filter((s): s is number => s != null);
+        if (sols.length) {
+          setSolCursor(Math.max(...sols));
+        } else {
+          setSolCursor(selectedStop.sol_max ?? null);
+        }
+      })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, [selectedStop]);
+
+  const solRange = useMemo(() => {
+    const sols = cameras
+      .map((c) => c.sol)
+      .filter((s): s is number => s != null);
+    if (!sols.length) {
+      return {
+        min: selectedStop?.sol_min ?? 0,
+        max: selectedStop?.sol_max ?? 0,
+      };
+    }
+    return { min: Math.min(...sols), max: Math.max(...sols) };
+  }, [cameras, selectedStop]);
+
+  // Playback along sol cursor
+  useEffect(() => {
+    if (!playing) {
+      if (playRef.current) window.clearInterval(playRef.current);
+      playRef.current = null;
+      return;
+    }
+    playRef.current = window.setInterval(() => {
+      setSolCursor((cur) => {
+        const c = cur ?? solRange.min;
+        if (c >= solRange.max) {
+          setPlaying(false);
+          return solRange.max;
+        }
+        return Math.min(solRange.max, c + 1);
+      });
+    }, 700);
+    return () => {
+      if (playRef.current) window.clearInterval(playRef.current);
+    };
+  }, [playing, solRange.min, solRange.max]);
 
   const filteredStops = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -90,20 +149,34 @@ export default function App() {
   }, [stops, filter]);
 
   const visibleCameras = useMemo(() => {
-    const sMin = solMin === "" ? null : Number(solMin);
-    const sMax = solMax === "" ? null : Number(solMax);
     return cameras.filter((c) => {
       const inst = c.instrument || "";
       const layerOk = LAYER_OPTIONS.some((l) => layers[l.id] && l.match(inst));
       if (!layerOk) return false;
-      if (sMin != null && c.sol != null && c.sol < sMin) return false;
-      if (sMax != null && c.sol != null && c.sol > sMax) return false;
+      if (solCursor != null && c.sol != null && c.sol > solCursor) return false;
       return c.has_pose && c.pos_x != null;
     });
-  }, [cameras, layers, solMin, solMax]);
+  }, [cameras, layers, solCursor]);
 
-  async function onSelectCamera(c: Camera) {
+  const solHistogram = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const c of cameras) {
+      if (c.sol == null || !c.has_pose) continue;
+      const inst = c.instrument || "";
+      if (!LAYER_OPTIONS.some((l) => layers[l.id] && l.match(inst))) continue;
+      map.set(c.sol, (map.get(c.sol) || 0) + 1);
+    }
+    return map;
+  }, [cameras, layers]);
+
+  const frameToken = `${selectedStop?.stop_id ?? "none"}:${cameras.length}`;
+
+  async function onSelectCamera(c: Camera, fly = false) {
     setSelected(c);
+    if (fly) {
+      setFlyTo(c);
+      setFlyToken((t) => t + 1);
+    }
     try {
       const d = await fetchImage(c.imageid);
       setDetail(d as Camera);
@@ -111,6 +184,18 @@ export default function App() {
       setDetail(c);
     }
   }
+
+  function flyToSelected() {
+    if (!selected) return;
+    setFlyTo(selected);
+    setFlyToken((t) => t + 1);
+  }
+
+  function selectStop(s: Stop) {
+    setSelectedStop(s);
+  }
+
+  const pathStops = useMemo(() => stops.slice(0, 200), [stops]);
 
   return (
     <div className="app">
@@ -145,20 +230,70 @@ export default function App() {
               />
               Rays
             </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={showFrustums}
+                onChange={(e) => setShowFrustums(e.target.checked)}
+              />
+              Frustums
+            </label>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+
+          <h2 style={{ margin: "4px 0 0" }}>Sol timeline</h2>
+          <div className="timeline">
+            <div className="timeline-meta">
+              <span>
+                sol {solCursor ?? "—"} / {solRange.max || "—"}
+              </span>
+              <span className="muted">
+                showing {visibleCameras.length} / {cameras.length}
+              </span>
+            </div>
             <input
-              style={{ width: "50%" }}
-              placeholder="sol min"
-              value={solMin}
-              onChange={(e) => setSolMin(e.target.value)}
+              type="range"
+              min={solRange.min}
+              max={Math.max(solRange.min, solRange.max)}
+              step={1}
+              value={solCursor ?? solRange.min}
+              disabled={!cameras.length}
+              onChange={(e) => {
+                setPlaying(false);
+                setSolCursor(Number(e.target.value));
+              }}
             />
-            <input
-              style={{ width: "50%" }}
-              placeholder="sol max"
-              value={solMax}
-              onChange={(e) => setSolMax(e.target.value)}
-            />
+            <div className="timeline-hist" title="Posed cameras per sol (active layers)">
+              {Array.from({ length: Math.max(1, solRange.max - solRange.min + 1) }, (_, i) => {
+                const sol = solRange.min + i;
+                const n = solHistogram.get(sol) || 0;
+                const maxN = Math.max(1, ...solHistogram.values());
+                const h = Math.round((n / maxN) * 100);
+                const active = solCursor != null && sol <= solCursor;
+                return (
+                  <div
+                    key={sol}
+                    className={"hist-bar" + (active ? " on" : "")}
+                    style={{ height: `${Math.max(n ? 8 : 2, h)}%` }}
+                    title={`sol ${sol}: ${n}`}
+                  />
+                );
+              })}
+            </div>
+            <div className="timeline-actions">
+              <button type="button" onClick={() => setSolCursor(solRange.min)}>
+                Start
+              </button>
+              <button
+                type="button"
+                onClick={() => setPlaying((p) => !p)}
+                disabled={!cameras.length}
+              >
+                {playing ? "Pause" : "Play"}
+              </button>
+              <button type="button" onClick={() => setSolCursor(solRange.max)}>
+                End
+              </button>
+            </div>
           </div>
         </div>
         <h2>Stops</h2>
@@ -177,7 +312,7 @@ export default function App() {
                 "stop-item" +
                 (selectedStop?.stop_id === s.stop_id ? " active" : "")
               }
-              onClick={() => setSelectedStop(s)}
+              onClick={() => selectStop(s)}
             >
               <div className="title">
                 site {s.site} · drive {s.drive}
@@ -197,14 +332,38 @@ export default function App() {
         <Scene
           cameras={visibleCameras}
           selectedId={selected?.imageid ?? null}
-          onSelect={onSelectCamera}
+          onSelect={(c) => onSelectCamera(c, true)}
           showRays={showRays}
+          showFrustums={showFrustums}
+          flyTo={flyTo}
+          flyToken={flyToken}
+          frameToken={frameToken}
         />
         <div className="hud">
           {selectedStop
-            ? `Stop ${selectedStop.stop_id} · showing ${visibleCameras.length} / ${cameras.length} cameras`
+            ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cameras`
             : "Select a stop"}
-          <div className="muted">Drag to orbit · scroll to zoom · click a point</div>
+          <div className="muted">
+            Drag orbit · scroll zoom · hover / click points · Play walks sols
+          </div>
+        </div>
+        <div className="path-strip" title="Mission path (stops ordered by first sol)">
+          {pathStops.map((s) => (
+            <button
+              key={s.stop_id}
+              type="button"
+              className={
+                "path-chip" + (selectedStop?.stop_id === s.stop_id ? " active" : "")
+              }
+              onClick={() => selectStop(s)}
+            >
+              <span className="path-sol">s{s.sol_min ?? "?"}</span>
+              <span>
+                {s.site}/{s.drive}
+              </span>
+              <span className="path-n">{s.n_posed}</span>
+            </button>
+          ))}
         </div>
       </main>
 
@@ -214,17 +373,25 @@ export default function App() {
           {!selected && (
             <div className="empty">
               Click a camera point in the 3D view to inspect metadata and image.
+              Use <strong>Play</strong> on the sol timeline to reveal coverage over
+              time.
             </div>
           )}
           {selected && (
             <>
               <img
+                key={selected.imageid}
                 src={thumbUrl(selected.imageid, "small")}
                 alt={selected.imageid}
                 onError={(e) => {
                   (e.target as HTMLImageElement).style.opacity = "0.3";
                 }}
               />
+              <div className="inspector-actions">
+                <button type="button" onClick={flyToSelected}>
+                  Fly to camera
+                </button>
+              </div>
               <dl>
                 <dt>imageid</dt>
                 <dd>{selected.imageid}</dd>
@@ -239,6 +406,11 @@ export default function App() {
                   {selected.model_type}
                   {selected.model_ok ? " ✓" : ""}
                 </dd>
+                <dt>FOV</dt>
+                <dd>
+                  {selected.hfov_deg?.toFixed?.(0) ?? selected.hfov_deg}° ×{" "}
+                  {selected.vfov_deg?.toFixed?.(0) ?? selected.vfov_deg}°
+                </dd>
                 <dt>position</dt>
                 <dd>
                   ({selected.pos_x?.toFixed(3)}, {selected.pos_y?.toFixed(3)},{" "}
@@ -246,7 +418,7 @@ export default function App() {
                 </dd>
                 <dt>mast</dt>
                 <dd>
-                  az {selected.mast_az ?? "?"} · el {selected.mast_el ?? "?"}
+                  az {fmt(selected.mast_az)} · el {fmt(selected.mast_el)}
                 </dd>
                 <dt>title</dt>
                 <dd>{detail?.title || selected.title}</dd>
@@ -271,4 +443,9 @@ export default function App() {
       </aside>
     </div>
   );
+}
+
+function fmt(v: number | null | undefined) {
+  if (v == null || Number.isNaN(Number(v))) return "?";
+  return Number(v).toFixed(1);
 }
