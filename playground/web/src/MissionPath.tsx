@@ -370,6 +370,7 @@ export default function MissionPath({
             <RoverModel
               position={selectedNode.position}
               yawDeg={selectedNode.yawDeg}
+              frame="map"
               targetLength={roverLength}
               ground
             />

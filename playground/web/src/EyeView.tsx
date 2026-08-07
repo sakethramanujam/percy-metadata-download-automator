@@ -12,25 +12,10 @@ import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import type { Camera } from "./api";
 import { thumbUrl } from "./api";
+import { bodyDirToThree, bodyPosToThree } from "./coords";
 
-/** NASA (x,y,z) → Three Y-up */
-function toThree(c: {
-  pos_x?: number | null;
-  pos_y?: number | null;
-  pos_z?: number | null;
-}): THREE.Vector3 {
-  return new THREE.Vector3(c.pos_x ?? 0, c.pos_z ?? 0, c.pos_y ?? 0);
-}
-
-function lookThree(c: {
-  look_x?: number | null;
-  look_y?: number | null;
-  look_z?: number | null;
-}): THREE.Vector3 {
-  const v = new THREE.Vector3(c.look_x ?? 0, c.look_z ?? 0, c.look_y ?? 0);
-  if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 0, -1);
-  return v.normalize();
-}
+const toThree = bodyPosToThree;
+const lookThree = bodyDirToThree;
 
 function PhotoPlane({ cam, textureUrl }: { cam: Camera; textureUrl: string }) {
   const texture = useTexture(textureUrl);

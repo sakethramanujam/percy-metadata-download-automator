@@ -88,9 +88,14 @@ Official asset from [NASA Science](https://science.nasa.gov/resource/mars-persev
 
 ## Coordinate model
 
-Each **(site, drive)** stop is its own local frame. Camera positions and look vectors come from the NASA feed. The UI does **not** merge sites into a global Mars map (that needs external localization).
+Each **(site, drive)** stop uses the NASA **rover body frame** for raw-image poses:
 
-Three.js uses Y-up; we map NASA `(x,y,z)` → Three `(x, z, y)` for a more natural ground plane.
+- **+X** forward, **+Y** right, **+Z** down (mast cameras ≈ `z = -2 m`)
+- Three.js: `(x, y, z)_three = (x, -z, y)_body` so height is `-z`
+
+The stop view places the Perseverance mesh at the **body origin with identity heading** so Navcam/Mastcam rays start on the mast. Do **not** apply map yaw there (map yaw is only for the Jezero traverse scene).
+
+Mission path uses MMGIS **easting/northing** (+ map yaw) and is a separate frame from stop-local cameras.
 
 ## API sketch
 

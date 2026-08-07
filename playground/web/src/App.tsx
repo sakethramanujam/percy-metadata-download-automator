@@ -239,12 +239,12 @@ export default function App() {
 
   const pairBaseline = useMemo(() => {
     if (!selectedPair?.left_pos || !selectedPair?.right_pos) return null;
-    // NASA (x,y,z) → Three (x,z,y)
+    // Body frame (x,y,z) with Z-down → Three (x,-z,y)
     const [lx, ly, lz] = selectedPair.left_pos;
     const [rx, ry, rz] = selectedPair.right_pos;
     return [
-      [lx, lz, ly] as [number, number, number],
-      [rx, rz, ry] as [number, number, number],
+      [lx, -lz, ly] as [number, number, number],
+      [rx, -rz, ry] as [number, number, number],
     ] as [[number, number, number], [number, number, number]];
   }, [selectedPair]);
 

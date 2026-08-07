@@ -5,6 +5,7 @@ import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { Camera } from "./api";
 import RoverModel from "./RoverModel";
+import { bodyDirToThree, bodyPosToThree } from "./coords";
 
 const INSTRUMENT_COLORS: Record<string, string> = {
   NAVCAM_LEFT: "#4fc3f7",
@@ -20,22 +21,8 @@ const INSTRUMENT_COLORS: Record<string, string> = {
   DEFAULT: "#b0bec5",
 };
 
-/** NASA (x,y,z) → Three.js Y-up (x, z, y) */
-function toThree(c: {
-  pos_x?: number | null;
-  pos_y?: number | null;
-  pos_z?: number | null;
-}): THREE.Vector3 {
-  return new THREE.Vector3(c.pos_x ?? 0, c.pos_z ?? 0, c.pos_y ?? 0);
-}
-
-function lookThree(c: {
-  look_x?: number | null;
-  look_y?: number | null;
-  look_z?: number | null;
-}): THREE.Vector3 {
-  return new THREE.Vector3(c.look_x ?? 0, c.look_z ?? 0, c.look_y ?? 0).normalize();
-}
+const toThree = bodyPosToThree;
+const lookThree = bodyDirToThree;
 
 function colorFor(inst: string) {
   return INSTRUMENT_COLORS[inst] || INSTRUMENT_COLORS.DEFAULT;
@@ -413,7 +400,6 @@ export default function Scene({
   frameToken,
   pairIds,
   pairBaseline,
-  roverYawDeg,
   showRover = true,
 }: {
   cameras: Camera[];
@@ -426,26 +412,20 @@ export default function Scene({
   frameToken: string;
   pairIds?: Set<string>;
   pairBaseline?: [[number, number, number], [number, number, number]] | null;
-  /** Map yaw for body orientation when available. */
+  /** Unused in stop view: cameras are body-frame, not map-yawed. */
   roverYawDeg?: number | null;
   showRover?: boolean;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const pairSet = pairIds ?? new Set<string>();
 
-  // Local image frame is typically body-centric (meters); place rover at origin.
-  const roverPos = useMemo((): [number, number, number] => {
-    const posed = cameras.filter((c) => c.pos_x != null);
-    if (!posed.length) return [0, 0, 0];
-    // Slight ground under mean camera height
-    const ys = posed.map((c) => c.pos_z ?? 0);
-    const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
-    return [0, Math.min(0, meanY - 0.4), 0];
-  }, [cameras]);
+  // Camera poses are already in rover body frame (meters). Keep rover at origin
+  // with identity heading so mast/hazcam rays line up with the mesh.
+  const roverPos: [number, number, number] = [0, 0, 0];
 
   return (
     <Canvas
-      camera={{ position: [2, 2, 2], fov: 50, near: 0.01, far: 300 }}
+      camera={{ position: [3, 2.5, 3], fov: 50, near: 0.01, far: 300 }}
       onPointerMissed={() => setHoveredId(null)}
     >
       <color attach="background" args={["#0b0f14"]} />
@@ -454,11 +434,14 @@ export default function Scene({
       <hemisphereLight args={["#c5d4e8", "#4a3728", 0.3]} />
       <RaycasterTuning />
       <GroundGrid />
+      {/* Body-frame axes: X forward (red), Y up (green), Z right (blue) */}
+      <axesHelper args={[1.5]} />
       {showRover && (
         <Suspense fallback={null}>
           <RoverModel
             position={roverPos}
-            yawDeg={roverYawDeg ?? 0}
+            yawDeg={0}
+            frame="body"
             // Local frame ≈ meters; real rover ~3 m long
             targetLength={2.9}
             ground
