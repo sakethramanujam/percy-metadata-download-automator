@@ -599,6 +599,8 @@ export default function App() {
               frameToken={frameToken}
               pairIds={pairIds}
               pairBaseline={pairBaseline}
+              roverYawDeg={selectedStop?.yaw_deg ?? null}
+              showRover
             />
             <div className="hud">
               {selectedStop

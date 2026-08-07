@@ -76,6 +76,15 @@ Vite proxies `/api` to the backend on this machine.
 - **Stereo pairs**: ranked L/R Navcam–MCZ–Hazcam matches, teal baseline in 3D, side-by-side thumbs, JSON export
 - **Mission path mode**: schematic 3D trail of `(site, drive)` stops ordered by sol (not map coordinates); click a node to open that stop’s local camera cloud
 - **Rover eye view**: first-person look through a selected image (FOV-matched photo plane); drag to look; ←/→ step images
+- **Perseverance 3D model** (NASA/JPL-Caltech glTF) on the mission path (selected/latest waypoint) and in stop camera view
+
+## Rover 3D model
+
+Official asset from [NASA Science](https://science.nasa.gov/resource/mars-perseverance-rover-3d-model/):
+
+- File: `playground/web/public/models/Perseverance.glb`
+- Credit: **NASA/JPL-Caltech**
+- Placed on the map path at the selected (or latest) waypoint using MMGIS yaw; also shown at the origin of stop-local camera frames.
 
 ## Coordinate model
 

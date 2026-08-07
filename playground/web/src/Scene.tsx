@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Line, Html } from "@react-three/drei";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { Camera } from "./api";
+import RoverModel from "./RoverModel";
 
 const INSTRUMENT_COLORS: Record<string, string> = {
   NAVCAM_LEFT: "#4fc3f7",
@@ -412,6 +413,8 @@ export default function Scene({
   frameToken,
   pairIds,
   pairBaseline,
+  roverYawDeg,
+  showRover = true,
 }: {
   cameras: Camera[];
   selectedId: string | null;
@@ -423,9 +426,22 @@ export default function Scene({
   frameToken: string;
   pairIds?: Set<string>;
   pairBaseline?: [[number, number, number], [number, number, number]] | null;
+  /** Map yaw for body orientation when available. */
+  roverYawDeg?: number | null;
+  showRover?: boolean;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const pairSet = pairIds ?? new Set<string>();
+
+  // Local image frame is typically body-centric (meters); place rover at origin.
+  const roverPos = useMemo((): [number, number, number] => {
+    const posed = cameras.filter((c) => c.pos_x != null);
+    if (!posed.length) return [0, 0, 0];
+    // Slight ground under mean camera height
+    const ys = posed.map((c) => c.pos_z ?? 0);
+    const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+    return [0, Math.min(0, meanY - 0.4), 0];
+  }, [cameras]);
 
   return (
     <Canvas
@@ -435,8 +451,20 @@ export default function Scene({
       <color attach="background" args={["#0b0f14"]} />
       <ambientLight intensity={0.65} />
       <directionalLight position={[5, 8, 3]} intensity={0.85} />
+      <hemisphereLight args={["#c5d4e8", "#4a3728", 0.3]} />
       <RaycasterTuning />
       <GroundGrid />
+      {showRover && (
+        <Suspense fallback={null}>
+          <RoverModel
+            position={roverPos}
+            yawDeg={roverYawDeg ?? 0}
+            // Local frame ≈ meters; real rover ~3 m long
+            targetLength={2.9}
+            ground
+          />
+        </Suspense>
+      )}
       <Cameras
         cameras={cameras}
         selectedId={selectedId}

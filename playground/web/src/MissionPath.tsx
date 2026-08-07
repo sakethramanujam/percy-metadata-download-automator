@@ -1,9 +1,10 @@
-import { useMemo, useRef, useEffect } from "react";
+import { Suspense, useMemo, useRef, useEffect } from "react";
 import { Canvas, ThreeEvent, useFrame } from "@react-three/fiber";
 import { OrbitControls, Line, Html } from "@react-three/drei";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { MapWaypoint, Stop } from "./api";
+import RoverModel from "./RoverModel";
 
 export type PathNode = {
   id: string;
@@ -308,17 +309,30 @@ export default function MissionPath({
   const nWithImages = nodes.filter((n) => n.hasImages).length;
   const current = nodes[nodes.length - 1];
 
+  const selectedNode = useMemo(() => {
+    if (selectedStopId) {
+      const hit = nodes.find((n) => n.id === selectedStopId);
+      if (hit) return hit;
+    }
+    // default: latest waypoint (current rover location)
+    return current ?? null;
+  }, [nodes, selectedStopId, current]);
+
+  // Path uses ~25 m / scene unit → real 3 m rover ≈ 0.12 units; exaggerate for visibility
+  const roverLength = useMap ? 1.1 : 0.85;
+
   return (
     <div className="mission-path-wrap">
       <Canvas camera={{ position: [0, 12, 18], fov: 50, near: 0.1, far: 2000 }}>
         <color attach="background" args={["#0b0f14"]} />
         <ambientLight intensity={0.55} />
         <directionalLight position={[8, 14, 6]} intensity={0.9} />
+        <hemisphereLight args={["#b1c4de", "#3d2b1f", 0.35]} />
         <gridHelper args={[200, 40, "#334155", "#1e293b"]} />
         <Html position={[0, 0.02, 0]} center>
           <div className="path3d-axis-label">
             {useMap
-              ? "Real traverse (MMGIS easting/northing) · teal = has local images · gray = map-only"
+              ? "Real traverse (MMGIS) · rover model at selected/latest stop · teal = has images"
               : "Schematic path (map data missing — run fetch_mmgis)"}
           </div>
         </Html>
@@ -330,7 +344,6 @@ export default function MissionPath({
             if (n.stop) {
               onSelectStop(n.stop);
             } else if (n.site != null && n.drive != null) {
-              // synthesize minimal stop for map-only nodes
               onSelectStop({
                 stop_id: n.id,
                 site: n.site,
@@ -352,6 +365,16 @@ export default function MissionPath({
             }
           }}
         />
+        {selectedNode && (
+          <Suspense fallback={null}>
+            <RoverModel
+              position={selectedNode.position}
+              yawDeg={selectedNode.yawDeg}
+              targetLength={roverLength}
+              ground
+            />
+          </Suspense>
+        )}
         <FramePath nodes={nodes} />
       </Canvas>
       <div className="hud mission-hud">
@@ -361,9 +384,15 @@ export default function MissionPath({
         {current?.distTotalM != null && (
           <> · ~{(current.distTotalM / 1000).toFixed(1)} km driven</>
         )}
+        {selectedNode && (
+          <>
+            {" · "}
+            rover @ sol {selectedNode.sol ?? "?"} ({selectedNode.site}/
+            {selectedNode.drive})
+          </>
+        )}
         <div className="muted">
-          Click a node to open stop cameras / eye view. Source: NASA MMGIS M20
-          waypoints.
+          Click a node to place the rover and open stop cameras. Model: NASA/JPL-Caltech.
         </div>
       </div>
     </div>
