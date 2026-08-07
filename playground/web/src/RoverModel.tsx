@@ -1,29 +1,26 @@
 import { useLayoutEffect, useMemo } from "react";
 import { useGLTF } from "@react-three/drei";
 import * as THREE from "three";
-import { ROVER_MODEL_YAW_OFFSET_DEG } from "./coords";
 
 const MODEL_URL = "/models/Perseverance.glb";
 
 export type RoverModelProps = {
-  /** World position of rover origin (body / map frame). */
+  /** World position of rover origin. */
   position?: [number, number, number];
   /**
    * Heading in degrees.
-   * - frame "body": usually 0 (cameras already in body frame).
-   * - frame "map": MMGIS yaw, 0 ≈ north (+X east, +Z south).
+   * - frame "body": keep 0 — cameras already share the GLB body frame.
+   * - frame "map": MMGIS yaw (0 ≈ north) in the EN path scene.
    */
   yawDeg?: number | null;
   /**
-   * "body" = stop-local camera cloud (identity heading + model forward fix).
-   * "map" = mission path EN scene with geographic yaw.
+   * "body" = stop-local cloud: native GLB meters/origin (matches camera RBF mapping).
+   * "map" = mission path: scaled + map yaw.
    */
   frame?: "body" | "map";
-  /** Desired rover length along longest horizontal axis (scene units). */
+  /** Map-frame only: desired length in scene units. */
   targetLength?: number;
-  /** Extra uniform scale multiplier after fitting targetLength. */
   scaleMul?: number;
-  /** Lift model so bottom of bbox sits near y=0. */
   ground?: boolean;
   visible?: boolean;
 };
@@ -31,6 +28,9 @@ export type RoverModelProps = {
 /**
  * Official NASA/JPL-Caltech Perseverance glTF.
  * https://science.nasa.gov/resource/mars-perseverance-rover-3d-model/
+ *
+ * Native GLB axes (approx): +X right, +Y up, +Z forward, origin near ground.
+ * That matches stop-view camera mapping in coords.ts.
  */
 export default function RoverModel({
   position = [0, 0, 0],
@@ -53,20 +53,30 @@ export default function RoverModel({
       }
     });
 
+    if (frame === "body") {
+      // Preserve authoring origin (aligns with body-frame camera positions).
+      // Only nudge so the lowest wheel sits on y=0 if slightly buried/floating.
+      if (ground) {
+        const box = new THREE.Box3().setFromObject(clone);
+        if (Number.isFinite(box.min.y) && Math.abs(box.min.y) < 0.5) {
+          clone.position.y -= box.min.y;
+        }
+      }
+      return { clone, fitScale: 1 };
+    }
+
+    // Map path: fit length and center for schematic visibility
     const box = new THREE.Box3().setFromObject(clone);
     const size = new THREE.Vector3();
     box.getSize(size);
     const nativeLength = Math.max(size.x, size.z, 1e-6);
     const fitScale = targetLength / nativeLength;
-
-    // Center XZ; put wheels on y=0
     const center = new THREE.Vector3();
     box.getCenter(center);
     const yOff = ground ? -box.min.y : 0;
     clone.position.set(-center.x, yOff, -center.z);
-
     return { clone, fitScale };
-  }, [scene, targetLength, ground]);
+  }, [scene, frame, targetLength, ground]);
 
   useLayoutEffect(() => {
     clone.traverse((obj) => {
@@ -83,17 +93,18 @@ export default function RoverModel({
   }, [clone]);
 
   const yawRad = ((yawDeg ?? 0) * Math.PI) / 180;
-  // Map: 0 north, +Z south → rotY = π + yaw
-  // Body: cameras use +X forward; glTF often +Z forward → apply offset so mesh +X matches body
-  const rotY =
-    frame === "body"
-      ? yawRad + (ROVER_MODEL_YAW_OFFSET_DEG * Math.PI) / 180
-      : Math.PI + yawRad;
+  // Map path: 0 north, scene +Z south → π + yaw
+  // Body: identity — GLB already +Z forward like our camera mapping
+  const rotY = frame === "body" ? 0 : Math.PI + yawRad;
 
   if (!visible) return null;
 
   return (
-    <group position={position} rotation={[0, rotY, 0]} scale={fitScale * scaleMul}>
+    <group
+      position={position}
+      rotation={[0, rotY, 0]}
+      scale={fitScale * scaleMul}
+    >
       <primitive object={clone} />
     </group>
   );

@@ -88,14 +88,23 @@ Official asset from [NASA Science](https://science.nasa.gov/resource/mars-persev
 
 ## Coordinate model
 
-Each **(site, drive)** stop uses the NASA **rover body frame** for raw-image poses:
+### Stop / eye view (aligned to the GLB)
 
-- **+X** forward, **+Y** right, **+Z** down (mast cameras ≈ `z = -2 m`)
-- Three.js: `(x, y, z)_three = (x, -z, y)_body` so height is `-z`
+Raw-image poses use a rover body frame (**+X** forward, **+Y** right, **+Z** down).  
+The official Perseverance GLB is authored as **+X** right, **+Y** up, **+Z** forward (meters, origin near the ground).
 
-The stop view places the Perseverance mesh at the **body origin with identity heading** so Navcam/Mastcam rays start on the mast. Do **not** apply map yaw there (map yaw is only for the Jezero traverse scene).
+We map poses into that same frame:
 
-Mission path uses MMGIS **easting/northing** (+ map yaw) and is a separate frame from stop-local cameras.
+```text
+three = (body.y, -body.z, body.x)   # right, up, forward
+```
+
+so Navcam/Mastcam rays start near the mast head and hazcams near the chassis cameras.  
+The mesh is loaded **without re-centering** in stop view (native origin preserved). Map yaw is **not** applied here.
+
+### Mission path
+
+Uses MMGIS **easting/northing** (+ map yaw). Separate from stop-local body/GLB frame.
 
 ## API sketch
 

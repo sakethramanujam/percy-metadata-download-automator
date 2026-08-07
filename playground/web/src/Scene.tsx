@@ -419,13 +419,12 @@ export default function Scene({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const pairSet = pairIds ?? new Set<string>();
 
-  // Camera poses are already in rover body frame (meters). Keep rover at origin
-  // with identity heading so mast/hazcam rays line up with the mesh.
+  // Camera poses share the GLB authoring frame (meters). Rover stays at origin.
   const roverPos: [number, number, number] = [0, 0, 0];
 
   return (
     <Canvas
-      camera={{ position: [3, 2.5, 3], fov: 50, near: 0.01, far: 300 }}
+      camera={{ position: [3.5, 2.2, 4], fov: 50, near: 0.01, far: 300 }}
       onPointerMissed={() => setHoveredId(null)}
     >
       <color attach="background" args={["#0b0f14"]} />
@@ -434,7 +433,7 @@ export default function Scene({
       <hemisphereLight args={["#c5d4e8", "#4a3728", 0.3]} />
       <RaycasterTuning />
       <GroundGrid />
-      {/* Body-frame axes: X forward (red), Y up (green), Z right (blue) */}
+      {/* Axes match GLB: X right (red), Y up (green), Z forward (blue) */}
       <axesHelper args={[1.5]} />
       {showRover && (
         <Suspense fallback={null}>
@@ -442,8 +441,6 @@ export default function Scene({
             position={roverPos}
             yawDeg={0}
             frame="body"
-            // Local frame ≈ meters; real rover ~3 m long
-            targetLength={2.9}
             ground
           />
         </Suspense>
