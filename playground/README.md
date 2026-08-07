@@ -70,6 +70,7 @@ Vite proxies `/api` to the backend on this machine.
 - 3D poses, look **rays**, optional multi **frustums**
 - Hover labels, click to select, **Fly to camera**
 - Inspector with proxied NASA thumbnail
+- **Stereo pairs**: ranked L/R Navcam–MCZ–Hazcam matches, teal baseline in 3D, side-by-side thumbs, JSON export
 
 ## Coordinate model
 
@@ -87,6 +88,7 @@ Three.js uses Y-up; we map NASA `(x,y,z)` → Three `(x, z, y)` for a more natur
 | `GET /api/stops/{site}/{drive}/cameras` | Posed cameras for 3D |
 | `GET /api/images/{imageid}` | Full metadata row |
 | `GET /api/images/{imageid}/thumb?size=small` | Proxied/cached image |
+| `GET /api/stops/{site}/{drive}/stereo-pairs` | Ranked L/R stereo candidates |
 
 ## Tests
 
