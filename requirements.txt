@@ -2,6 +2,14 @@
 pandas>=2.0,<3
 requests>=2.31,<3
 tqdm>=4.66,<5
+numpy>=1.26,<3
 
 # Kaggle CLI (daily dataset publish)
 kaggle>=2.0,<3
+
+# Playground index + API
+pyarrow>=14,<20
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1
+httpx>=0.27,<1
+pytest>=8.0,<9

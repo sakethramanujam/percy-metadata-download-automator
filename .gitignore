@@ -17,6 +17,11 @@ logs/
 *.csv
 !scripts/*_metadata.csv
 
+# Playground web
+playground/web/node_modules/
+playground/web/dist/
+
+
 # Kaggle upload staging (keep metadata JSON)
 kaggle_dataset/*
 !kaggle_dataset/dataset-metadata.json

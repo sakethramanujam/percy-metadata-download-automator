@@ -140,16 +140,34 @@ Useful flags:
 - `--max-pages N` — cap pages (testing / slow networks)
 - `daily --always-publish` — push even with no new rows
 
+## 3D playground (local)
+
+Explore poses and images interactively (Three.js + FastAPI):
+
+```bash
+python -m playground.pipeline.build_index
+uvicorn playground.api.main:app --reload --port 8000
+# other terminal:
+cd playground/web && npm install && npm run dev
+```
+
+See [playground/README.md](playground/README.md).
+
 ## Layout
 
 ```
 data/                         # local full-metadata.csv + state.json (gitignored)
+data/derived/                 # parquet index for playground (gitignored)
 kaggle_dataset/
   dataset-metadata.json       # Kaggle dataset id / description
 scripts/
   metadata.py                 # main CLI
   run_daily.sh                # cron/systemd entrypoint
   *_metadata.csv              # small historical samples
+playground/
+  pipeline/                   # CSV → parquet index
+  api/                        # FastAPI
+  web/                        # Vite + React Three Fiber UI
 ```
 
 ## Notes
