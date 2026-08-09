@@ -1,52 +1,20 @@
-import {
-  Component,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
 /**
- * Photo sphere viewer.
- *
- * Default path is a flat equirect drag-viewer (always visible).
- * Optional WebGL sphere is layered on top when it initializes successfully.
- * Never depends on WebGL for a non-blank screen.
+ * Photo sphere / equirect viewer.
+ * Renders via portal to document.body so nothing in the app grid can clip it.
+ * Default = flat equirect (always visible). 3D is opt-in.
  */
 
-class SphereErrorBoundary extends Component<
-  { children: ReactNode; onError: (msg: string) => void },
-  { crashed: boolean }
-> {
-  state = { crashed: false };
-  static getDerivedStateFromError() {
-    return { crashed: true };
-  }
-  componentDidCatch(err: Error) {
-    this.props.onError(err?.message || String(err));
-  }
-  render() {
-    if (this.state.crashed) return null;
-    return this.props.children;
-  }
-}
-
-function SphereMesh({ map }: { map: THREE.Texture }) {
-  return (
-    <mesh scale={[-1, 1, 1]}>
-      <sphereGeometry args={[500, 60, 40]} />
-      <meshBasicMaterial map={map} side={THREE.FrontSide} toneMapped={false} />
-    </mesh>
-  );
-}
-
-function OrbitLook({
+function SphereScene({
+  texture,
   yaw,
   pitch,
 }: {
+  texture: THREE.Texture;
   yaw: number;
   pitch: number;
 }) {
@@ -56,71 +24,88 @@ function OrbitLook({
     const sy = Math.sin(yaw);
     const cp = Math.cos(pitch);
     const sp = Math.sin(pitch);
-    camera.position.set(0, 0, 0.05);
+    camera.position.set(0, 0, 0);
     camera.up.set(0, 1, 0);
-    camera.lookAt(sy * cp, sp, cy * cp);
+    // Look along unit direction (not at origin)
+    const t = new THREE.Vector3(sy * cp, sp, cy * cp);
+    camera.lookAt(t);
   });
-  return null;
+
+  return (
+    <mesh>
+      {/* Inside of sphere: BackSide + no scale flip */}
+      <sphereGeometry args={[500, 64, 40]} />
+      <meshBasicMaterial
+        map={texture}
+        side={THREE.BackSide}
+        toneMapped={false}
+      />
+    </mesh>
+  );
 }
 
-function WebGLSphere({
+function GlSphere({
   imageUrl,
   yaw,
   pitch,
-  onReady,
   onFail,
 }: {
   imageUrl: string;
   yaw: number;
   pitch: number;
-  onReady: () => void;
-  onFail: (msg: string) => void;
+  onFail: (m: string) => void;
 }) {
-  const [map, setMap] = useState<THREE.Texture | null>(null);
-  const mapRef = useRef<THREE.Texture | null>(null);
+  const [tex, setTex] = useState<THREE.Texture | null>(null);
+  const ref = useRef<THREE.Texture | null>(null);
 
   useEffect(() => {
     let dead = false;
-    const loader = new THREE.TextureLoader();
-    // blob: URLs must NOT use crossOrigin
-    loader.setCrossOrigin("");
-    loader.load(
-      imageUrl,
-      (tex) => {
-        if (dead) {
-          tex.dispose();
-          return;
+    const img = new Image();
+    // Never set crossOrigin on blob: URLs
+    if (/^https?:/i.test(imageUrl)) img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (dead) return;
+      try {
+        const max = 2048;
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        if (Math.max(w, h) > max) {
+          const s = max / Math.max(w, h);
+          w = Math.round(w * s);
+          h = Math.round(h * s);
         }
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-        if (mapRef.current) mapRef.current.dispose();
-        mapRef.current = tex;
-        setMap(tex);
-        onReady();
-      },
-      undefined,
-      () => onFail("WebGL texture load failed")
-    );
-    return () => {
-      dead = true;
-      if (mapRef.current) {
-        mapRef.current.dispose();
-        mapRef.current = null;
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        if (!ctx) throw new Error("no 2d context");
+        ctx.drawImage(img, 0, 0, w, h);
+        const t = new THREE.CanvasTexture(c);
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.flipY = true;
+        t.needsUpdate = true;
+        if (ref.current) ref.current.dispose();
+        ref.current = t;
+        setTex(t);
+      } catch (e) {
+        onFail(e instanceof Error ? e.message : String(e));
       }
     };
-  }, [imageUrl, onFail, onReady]);
+    img.onerror = () => onFail("texture image decode failed");
+    img.src = imageUrl;
+    return () => {
+      dead = true;
+      if (ref.current) {
+        ref.current.dispose();
+        ref.current = null;
+      }
+    };
+  }, [imageUrl, onFail]);
 
-  if (!map) return null;
-
-  return (
-    <>
-      <SphereMesh map={map} />
-      <OrbitLook yaw={yaw} pitch={pitch} />
-    </>
-  );
+  if (!tex) {
+    return null;
+  }
+  return <SphereScene texture={tex} yaw={yaw} pitch={pitch} />;
 }
 
 export default function PhotoSphere({
@@ -140,23 +125,20 @@ export default function PhotoSphere({
 }) {
   const [yaw, setYaw] = useState(0);
   const [pitch, setPitch] = useState(0);
-  const [mode, setMode] = useState<"flat" | "gl">("flat");
-  const [glReady, setGlReady] = useState(false);
+  const [mode3d, setMode3d] = useState(false);
   const [glError, setGlError] = useState<string | null>(null);
   const [imgOk, setImgOk] = useState(false);
-  const [imgError, setImgError] = useState<string | null>(null);
+  const [imgErr, setImgErr] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const drag = useRef<{ x: number; y: number } | null>(null);
 
-  // Prefer flat first so something is always on screen; try GL after img loads
   useEffect(() => {
-    setImgOk(false);
-    setImgError(null);
-    setGlReady(false);
-    setGlError(null);
-    setMode("flat");
     setYaw(0);
     setPitch(0);
+    setMode3d(false);
+    setGlError(null);
+    setImgOk(false);
+    setImgErr(null);
   }, [imageUrl]);
 
   useEffect(() => {
@@ -164,33 +146,31 @@ export default function PhotoSphere({
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
-        return;
       }
-      const step = 0.08;
-      if (e.key === "ArrowLeft") setYaw((y) => y + step);
-      if (e.key === "ArrowRight") setYaw((y) => y - step);
-      if (e.key === "ArrowUp") setPitch((p) => Math.min(1.2, p + step));
-      if (e.key === "ArrowDown") setPitch((p) => Math.max(-1.2, p - step));
+      const s = 0.1;
+      if (e.key === "ArrowLeft") setYaw((y) => y + s);
+      if (e.key === "ArrowRight") setYaw((y) => y - s);
+      if (e.key === "ArrowUp") setPitch((p) => Math.min(1.1, p + s));
+      if (e.key === "ArrowDown") setPitch((p) => Math.max(-1.1, p - s));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const onGlReady = useCallback(() => {
-    setGlReady(true);
-    setMode("gl");
+  // Prevent body scroll under overlay
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, []);
 
-  const onGlFail = useCallback((msg: string) => {
-    setGlError(msg);
-    setMode("flat");
-  }, []);
-
-  const onPointerDown = (e: React.PointerEvent) => {
+  const onPtrDown = (e: React.PointerEvent) => {
     drag.current = { x: e.clientX, y: e.clientY };
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
   };
-  const onPointerUp = (e: React.PointerEvent) => {
+  const onPtrUp = (e: React.PointerEvent) => {
     drag.current = null;
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
@@ -198,148 +178,138 @@ export default function PhotoSphere({
       /* ignore */
     }
   };
-  const onPointerMove = (e: React.PointerEvent) => {
+  const onPtrMove = (e: React.PointerEvent) => {
     if (!drag.current) return;
     const dx = e.clientX - drag.current.x;
     const dy = e.clientY - drag.current.y;
     drag.current = { x: e.clientX, y: e.clientY };
     setYaw((y) => y - dx * 0.005);
-    setPitch((p) => Math.max(-1.2, Math.min(1.2, p - dy * 0.005)));
+    setPitch((p) => Math.max(-1.1, Math.min(1.1, p - dy * 0.004)));
   };
 
   async function downloadPano() {
     setDownloading(true);
     try {
       const r = await fetch(imageUrl);
-      if (!r.ok) throw new Error(String(r.status));
       const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
+      const u = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = u;
       a.download = downloadName || "photo_sphere.jpg";
       a.click();
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(u);
     } catch {
-      window.open(imageUrl, "_blank", "noopener,noreferrer");
+      window.open(imageUrl, "_blank");
     } finally {
       setDownloading(false);
     }
   }
 
-  // object-position for equirect pan (0 yaw = center)
-  let h = ((-yaw * 180) / Math.PI) % 360;
-  if (h < 0) h += 360;
-  const posX = 50 - (h / 360) * 100;
-  const posY = 50 + (pitch / 1.2) * 25;
+  let hdg = ((-yaw * 180) / Math.PI) % 360;
+  if (hdg < 0) hdg += 360;
+  // object-position: pan equirect (center = yaw 0)
+  const objX = `${50 - (hdg / 360) * 100}%`;
+  const objY = `${50 + (pitch / 1.1) * 30}%`;
 
-  return (
-    <div className="photo-sphere-overlay" role="dialog" aria-modal="true">
-      <div className="pano-chrome top">
-        <div>
+  const ui = (
+    <div className="ps-root" role="dialog" aria-modal="true" aria-label="Photo sphere">
+      <header className="ps-bar ps-bar-top">
+        <div className="ps-title">
           <strong>{title || "Photo sphere"}</strong>
-          {meta && <span className="muted"> · {meta}</span>}
+          {meta ? <span className="muted"> · {meta}</span> : null}
           <span className="muted">
             {" "}
-            · {mode === "gl" && glReady ? "3D sphere" : "equirect pan"} · hdg{" "}
-            {h.toFixed(0)}°
+            · {mode3d ? "3D" : "flat"} · hdg {hdg.toFixed(0)}°
           </span>
         </div>
-        <div className="pano-actions">
-          {imgOk && !glError && (
-            <button
-              type="button"
-              onClick={() => setMode((m) => (m === "gl" ? "flat" : "gl"))}
-            >
-              {mode === "gl" ? "Use flat" : "Try 3D"}
-            </button>
-          )}
+        <div className="ps-actions">
+          <button
+            type="button"
+            disabled={!imgOk || !!glError}
+            onClick={() => {
+              setGlError(null);
+              setMode3d((v) => !v);
+            }}
+          >
+            {mode3d ? "Flat view" : "3D sphere"}
+          </button>
           {onFlat && (
             <button type="button" onClick={onFlat}>
-              2D pano UI
+              Classic 2D
             </button>
           )}
           <button type="button" onClick={downloadPano} disabled={downloading}>
-            {downloading ? "Saving…" : "Download"}
+            {downloading ? "…" : "Download"}
           </button>
-          <button type="button" onClick={onClose}>
+          <button type="button" className="ps-close" onClick={onClose}>
             Close (Esc)
           </button>
         </div>
-      </div>
+      </header>
 
       <div
-        className="photo-sphere-stage"
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-        onPointerMove={onPointerMove}
+        className="ps-stage"
+        onPointerDown={onPtrDown}
+        onPointerUp={onPtrUp}
+        onPointerCancel={onPtrUp}
+        onPointerMove={onPtrMove}
       >
-        {/* Always-visible equirect layer */}
+        {/* Flat equirect — always rendered under 3D */}
         <img
-          className="photo-sphere-img"
+          className="ps-img"
           src={imageUrl}
-          alt="Site equirect panorama"
+          alt="Equirectangular panorama"
           draggable={false}
-          style={{ objectPosition: `${posX}% ${posY}%` }}
-          onLoad={() => {
-            setImgOk(true);
-            // Try 3D after flat image is proven; falls back if WebGL fails
-            setMode("gl");
+          style={{
+            objectPosition: `${objX} ${objY}`,
+            // hide flat only when 3D is active and working
+            opacity: mode3d && !glError ? 0 : 1,
+            visibility: mode3d && !glError ? "hidden" : "visible",
           }}
+          onLoad={() => setImgOk(true)}
           onError={() =>
-            setImgError(
-              "Could not display pano image. Try Download or re-stitch."
-            )
+            setImgErr("Image failed to display. Use Download to inspect the JPEG.")
           }
         />
 
-        {!imgOk && !imgError && (
-          <div className="sphere-status">Loading panorama image…</div>
+        {!imgOk && !imgErr && (
+          <div className="ps-msg">Loading panorama image…</div>
         )}
-        {imgError && (
-          <div className="sphere-status error">
-            {imgError}
-            <div className="muted" style={{ marginTop: 8, wordBreak: "break-all" }}>
-              {imageUrl.slice(0, 120)}
-            </div>
-          </div>
-        )}
+        {imgErr && <div className="ps-msg ps-err">{imgErr}</div>}
 
-        {/* Optional WebGL sphere (only when user wants / after img ok) */}
-        {imgOk && mode === "gl" && !glError && (
-          <div className="photo-sphere-gl">
-            <SphereErrorBoundary onError={onGlFail}>
-              <Canvas
-                camera={{ fov: 75, near: 0.1, far: 2000, position: [0, 0, 0.1] }}
-                dpr={1}
-                gl={{ antialias: true, alpha: false }}
-                onCreated={({ gl }) => {
-                  gl.setClearColor("#0a0c10");
+        {mode3d && imgOk && !glError && (
+          <div className="ps-gl">
+            <Canvas
+              camera={{ position: [0, 0, 0.1], fov: 75, near: 0.1, far: 2000 }}
+              dpr={1}
+              gl={{ antialias: true, alpha: false }}
+              onCreated={({ gl }) => gl.setClearColor("#111820")}
+            >
+              <GlSphere
+                imageUrl={imageUrl}
+                yaw={yaw}
+                pitch={pitch}
+                onFail={(m) => {
+                  setGlError(m);
+                  setMode3d(false);
                 }}
-              >
-                <WebGLSphere
-                  imageUrl={imageUrl}
-                  yaw={yaw}
-                  pitch={pitch}
-                  onReady={onGlReady}
-                  onFail={onGlFail}
-                />
-              </Canvas>
-            </SphereErrorBoundary>
-            {!glReady && (
-              <div className="sphere-status gl-wait">Starting 3D…</div>
-            )}
+              />
+            </Canvas>
           </div>
         )}
 
-        {glError && mode === "flat" && (
-          <div className="sphere-gl-note muted">3D unavailable ({glError}) — flat pan active</div>
+        {glError && (
+          <div className="ps-toast">3D failed: {glError} — showing flat</div>
         )}
       </div>
 
-      <div className="pano-chrome bottom muted">
-        Drag to look · ←/→/↑/↓ · Esc close · equirect from body-frame poses
-      </div>
+      <footer className="ps-bar ps-bar-bot muted">
+        Drag to look · arrows pan · Esc close
+        {imgOk ? ` · image OK` : ""}
+        {imageUrl.startsWith("blob:") ? " · blob" : ""}
+      </footer>
     </div>
   );
+
+  return createPortal(ui, document.body);
 }
