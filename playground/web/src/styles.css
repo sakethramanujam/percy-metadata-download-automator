@@ -774,6 +774,70 @@ button.linkish {
   text-align: left;
 }
 
+/* Coverage heatmap (stop view sidebar) */
+.coverage-panel {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(12, 16, 22, 0.6);
+}
+
+.coverage-stats {
+  font-size: 0.8rem;
+  margin-bottom: 6px;
+}
+
+.coverage-fam {
+  font-size: 0.72rem;
+  margin-top: 2px;
+}
+
+.coverage-img-wrap {
+  margin: 6px 0;
+}
+
+.coverage-img {
+  width: 100%;
+  border-radius: 4px;
+  display: block;
+  image-rendering: pixelated;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.coverage-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  color: #9aabbc;
+  margin-top: 2px;
+}
+
+.coverage-axis-el {
+  font-size: 0.62rem;
+  margin-top: 2px;
+}
+
+.pano-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.pano-actions button {
+  background: #1a2430;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.pano-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
 /* Guided tour overlay */
 .tour-overlay {
   position: absolute;

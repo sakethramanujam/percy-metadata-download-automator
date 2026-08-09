@@ -247,8 +247,9 @@ export function fetchMap() {
 }
 
 export type PanoSourceSize = "small" | "medium" | "large" | "full";
+export type PanoProjection = "cylinder" | "equirect";
 
-/** Pose-driven cylindrical pano for a stop (returns image URL + optional meta). */
+/** Pose-driven pano for a stop (cylinder crop or full equirect). */
 export function panoUrl(
   site: number,
   drive: number,
@@ -256,12 +257,14 @@ export function panoUrl(
     max_frames?: number;
     out_width?: number;
     size?: PanoSourceSize;
+    projection?: PanoProjection;
   }
 ) {
   const params = new URLSearchParams({
     max_frames: String(opts?.max_frames ?? 40),
     out_width: String(opts?.out_width ?? 4096),
     size: opts?.size ?? "medium",
+    projection: opts?.projection ?? "cylinder",
   });
   return `/api/stops/${site}/${drive}/pano?${params}`;
 }
@@ -273,12 +276,14 @@ export function fetchPanoMeta(
     max_frames?: number;
     out_width?: number;
     size?: PanoSourceSize;
+    projection?: PanoProjection;
   }
 ) {
   const params = new URLSearchParams({
     max_frames: String(opts?.max_frames ?? 40),
     out_width: String(opts?.out_width ?? 4096),
     size: opts?.size ?? "medium",
+    projection: opts?.projection ?? "cylinder",
     meta_only: "true",
   });
   return getJson<{
@@ -297,12 +302,60 @@ export function fetchPanoMeta(
     az_span_deg: number;
     el_span_deg: number;
     method: string;
+    projection?: PanoProjection;
     frame: string;
     elapsed_ms: number;
     source_size?: string;
     source_max_side?: number;
     note: string;
+    url?: string;
   }>(`/api/stops/${site}/${drive}/pano?${params}`);
+}
+
+export type CoverageResult = {
+  site: number;
+  drive: number;
+  n_posed: number;
+  az_bins: number;
+  el_bins: number;
+  by_family: Record<string, number>;
+  samples: Array<{
+    imageid: string;
+    instrument: string;
+    family: string;
+    sol: number | null;
+    az_deg: number;
+    el_deg: number;
+  }>;
+  stats: {
+    n_posed: number;
+    cells_with_look: number;
+    cells_with_fov: number;
+    coverage_look_frac: number;
+    coverage_fov_frac: number;
+    coverage_useful_frac: number;
+    useful_band_el_deg: number[];
+    max_look_bin: number;
+  };
+  preview_data_url: string | null;
+  note?: string;
+};
+
+export function fetchCoverage(
+  site: number,
+  drive: number,
+  opts?: { sol_min?: number; sol_max?: number }
+) {
+  const params = new URLSearchParams({
+    az_bins: "72",
+    el_bins: "36",
+    fill_fov: "true",
+  });
+  if (opts?.sol_min != null) params.set("sol_min", String(opts.sol_min));
+  if (opts?.sol_max != null) params.set("sol_max", String(opts.sol_max));
+  return getJson<CoverageResult>(
+    `/api/stops/${site}/${drive}/coverage?${params}`
+  );
 }
 
 export function fetchStereoPairs(

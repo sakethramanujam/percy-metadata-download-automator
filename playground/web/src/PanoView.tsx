@@ -1,23 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * Drag-to-look cylindrical / wide panorama viewer.
+ * Drag-to-look cylindrical / equirect panorama viewer.
  * Image is produced by pose-driven stitch (body-frame look/up/FOV).
  */
 export default function PanoView({
   imageUrl,
   title,
   meta,
+  downloadName,
   onClose,
 }: {
   imageUrl: string;
   title?: string;
   meta?: string;
+  /** Suggested download filename (e.g. pano_3_0_equirect.jpg) */
+  downloadName?: string;
   onClose: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [offset, setOffset] = useState(0.5); // 0..1 horizontal scroll center
   const [dragging, setDragging] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const lastX = useRef(0);
 
   useEffect(() => {
@@ -56,6 +60,26 @@ export default function PanoView({
     setOffset((o) => Math.min(1, Math.max(0, o - dx / (w * 2.5))));
   };
 
+  async function downloadPano() {
+    setDownloading(true);
+    try {
+      const r = await fetch(imageUrl);
+      if (!r.ok) throw new Error(`download failed: ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = downloadName || "pano.jpg";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // fall back to opening image in a new tab
+      window.open(imageUrl, "_blank", "noopener,noreferrer");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   // object-position: percentage for the focal point of the wide image
   const pos = `${(offset * 100).toFixed(2)}% 50%`;
 
@@ -66,9 +90,14 @@ export default function PanoView({
           <strong>{title || "Site panorama"}</strong>
           {meta && <span className="muted"> · {meta}</span>}
         </div>
-        <button type="button" onClick={onClose}>
-          Close (Esc)
-        </button>
+        <div className="pano-actions">
+          <button type="button" onClick={downloadPano} disabled={downloading}>
+            {downloading ? "Saving…" : "Download JPEG"}
+          </button>
+          <button type="button" onClick={onClose}>
+            Close (Esc)
+          </button>
+        </div>
       </div>
       <div
         ref={wrapRef}
@@ -86,7 +115,8 @@ export default function PanoView({
         />
       </div>
       <div className="pano-chrome bottom muted">
-        Drag to look · ←/→ · Esc close · Stitched from metadata look/up/FOV (body frame)
+        Drag to look · ←/→ · Esc close · Download JPEG for equirect/VR tools ·
+        Pose look/up/FOV (body frame)
       </div>
     </div>
   );

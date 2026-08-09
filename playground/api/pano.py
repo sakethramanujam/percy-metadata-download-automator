@@ -265,19 +265,53 @@ _SIZE_MAX_SIDE = {
 }
 
 
-def stitch_pose_cylinder(
+def _stitch_bounds_cylinder(frames: pd.DataFrame) -> tuple[float, float, float, float]:
+    """Return az_min, az_span, el_min, el_span for adaptive cylindrical crop."""
+    els: list[float] = []
+    for _, row in frames.iterrows():
+        look, _, _ = _frame_basis(row)
+        _, el = look_az_el(look)
+        vf = math.radians(float(row.get("vfov_deg") or 34) * 0.55)
+        els.extend([el - vf, el + vf])
+
+    az_arr = np.array(
+        [look_az_el(_frame_basis(r)[0])[0] for _, r in frames.iterrows()],
+        dtype=float,
+    )
+    mean_az = math.atan2(float(np.mean(np.sin(az_arr))), float(np.mean(np.cos(az_arr))))
+    rel = (az_arr - mean_az + math.pi) % (2 * math.pi) - math.pi
+    pad = math.radians(25)
+    az_min = mean_az + float(rel.min()) - pad
+    az_max = mean_az + float(rel.max()) + pad
+    az_span = max(az_max - az_min, math.radians(30))
+    if az_span > math.radians(300):
+        az_min = mean_az - math.pi
+        az_span = 2 * math.pi
+
+    el_min = max(min(els) - math.radians(5), math.radians(-85))
+    el_max = min(max(els) + math.radians(5), math.radians(85))
+    el_span = max(el_max - el_min, math.radians(20))
+    return az_min, az_span, el_min, el_span
+
+
+def stitch_pose_pano(
     frames: pd.DataFrame,
     *,
     out_width: int = 4096,
     out_height: int = 1024,
     thumb_size: str = "small",
     max_side: Optional[int] = None,
+    projection: str = "cylinder",
 ) -> dict[str, Any]:
-    """Build cylindrical pano from posed frames; returns path + meta."""
+    """Build pose-driven pano (cylinder crop or full equirect) from frames."""
     if not _HAS_CV2:
         raise RuntimeError("OpenCV required for panorama encode")
     if frames.empty:
         raise ValueError("no frames to stitch")
+
+    projection = (projection or "cylinder").lower()
+    if projection not in ("cylinder", "equirect"):
+        projection = "cylinder"
 
     thumb_size = (thumb_size or "small").lower()
     if thumb_size not in _SIZE_MAX_SIDE:
@@ -286,44 +320,24 @@ def stitch_pose_cylinder(
         max_side = _SIZE_MAX_SIDE[thumb_size]
     max_side = int(max(256, min(max_side, 4096)))
 
-    # Az/el bounds from look centers expanded by half FOV
-    azs: list[float] = []
-    els: list[float] = []
-    for _, row in frames.iterrows():
-        look, _, _ = _frame_basis(row)
-        az, el = look_az_el(look)
-        hf = math.radians(float(row.get("hfov_deg") or 45) * 0.55)
-        vf = math.radians(float(row.get("vfov_deg") or 34) * 0.55)
-        azs.extend([az - hf, az + hf])
-        els.extend([el - vf, el + vf])
-
-    # Unwrap azimuth to a continuous span covering the set
-    az_arr = np.array(
-        [look_az_el(_frame_basis(r)[0])[0] for _, r in frames.iterrows()],
-        dtype=float,
-    )
-    # Choose origin near circular mean
-    mean_az = math.atan2(float(np.mean(np.sin(az_arr))), float(np.mean(np.cos(az_arr))))
-    # Relative az in [-pi, pi]
-    rel = (az_arr - mean_az + math.pi) % (2 * math.pi) - math.pi
-    pad = math.radians(25)
-    az_min = mean_az + float(rel.min()) - pad
-    az_max = mean_az + float(rel.max()) + pad
-    az_span = max(az_max - az_min, math.radians(30))
-    # If nearly full surround, force 360°
-    if az_span > math.radians(300):
-        az_min = mean_az - math.pi
-        az_span = 2 * math.pi
-
-    el_min = max(min(els) - math.radians(5), math.radians(-85))
-    el_max = min(max(els) + math.radians(5), math.radians(85))
-    el_span = max(el_max - el_min, math.radians(20))
-
-    # Aspect from angular span
     out_width = int(max(1024, min(out_width, 8192)))
-    aspect = az_span / el_span
-    out_height = int(max(256, min(out_height, int(out_width / aspect))))
-    out_height = min(out_height, 2048)
+
+    if projection == "equirect":
+        # Standard 2:1 equirectangular: full sphere
+        az_min = -math.pi
+        az_span = 2 * math.pi
+        el_min = -math.pi / 2
+        el_span = math.pi
+        out_height = int(max(512, min(out_width // 2, 4096)))
+        method = "pose_equirect_body_frame"
+        note_proj = "Equirectangular 360×180 mosaic"
+    else:
+        az_min, az_span, el_min, el_span = _stitch_bounds_cylinder(frames)
+        aspect = az_span / el_span
+        out_height = int(max(256, min(out_height, int(out_width / aspect))))
+        out_height = min(out_height, 2048)
+        method = "pose_cylinder_body_frame"
+        note_proj = "Cylindrical mosaic"
 
     canvas = np.zeros((out_height, out_width, 3), dtype=np.float32)
     weight = np.zeros((out_height, out_width), dtype=np.float32)
@@ -336,7 +350,6 @@ def stitch_pose_cylinder(
         if not url:
             continue
         try:
-            # cache key includes size tier so small/medium/large don't collide
             path, _ = get_cached_or_fetch(imageid, thumb_size, url)
             bgr = _load_bgr(path, max_side=max_side)
         except Exception:
@@ -371,23 +384,22 @@ def stitch_pose_cylinder(
     if not used or float(weight.max()) <= 0:
         raise RuntimeError("no frames projected (image fetch or pose failed)")
 
-    # Normalize blend
     w = weight[:, :, None]
     w = np.maximum(w, 1e-6)
     rgb = np.clip(canvas / w, 0, 255).astype(np.uint8)
-    # Fill holes with dark grey so viewer isn't pure black
     empty = weight < 1e-5
     rgb[empty] = (28, 24, 20)
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     key_src = (
         f"{frames.iloc[0].get('site')}_{frames.iloc[0].get('drive')}_"
-        f"{thumb_size}_{max_side}_{len(used)}_{out_width}x{out_height}_"
+        f"{projection}_{thumb_size}_{max_side}_{len(used)}_{out_width}x{out_height}_"
         + ",".join(u["imageid"] for u in used[:12])
     )
     key = hashlib.sha256(key_src.encode()).hexdigest()[:20]
     out_path = CACHE_DIR / f"pano_{key}.jpg"
-    cv2.imwrite(str(out_path), rgb, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    quality = 90 if projection == "equirect" else 88
+    cv2.imwrite(str(out_path), rgb, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
     return {
         "path": out_path,
@@ -400,16 +412,36 @@ def stitch_pose_cylinder(
         "el_min_deg": math.degrees(el_min),
         "el_span_deg": math.degrees(el_span),
         "elapsed_ms": (time.perf_counter() - t0) * 1000.0,
-        "method": "pose_cylinder_body_frame",
+        "method": method,
+        "projection": projection,
         "frame": "body (+X fwd, +Y right, +Z down)",
         "source_size": thumb_size,
         "source_max_side": max_side,
         "note": (
-            "Cylindrical mosaic from metadata look/up/right + FOV "
+            f"{note_proj} from metadata look/up/right + FOV "
             "(not feature-based stitching). "
             f"Source tier={thumb_size}, max edge={max_side}px."
         ),
     }
+
+
+def stitch_pose_cylinder(
+    frames: pd.DataFrame,
+    *,
+    out_width: int = 4096,
+    out_height: int = 1024,
+    thumb_size: str = "small",
+    max_side: Optional[int] = None,
+) -> dict[str, Any]:
+    """Backward-compatible cylindrical stitch."""
+    return stitch_pose_pano(
+        frames,
+        out_width=out_width,
+        out_height=out_height,
+        thumb_size=thumb_size,
+        max_side=max_side,
+        projection="cylinder",
+    )
 
 
 def build_stop_pano(
@@ -423,6 +455,7 @@ def build_stop_pano(
     out_width: int = 4096,
     thumb_size: str = "small",
     max_side: Optional[int] = None,
+    projection: str = "cylinder",
 ) -> dict[str, Any]:
     frames = select_pano_frames(
         site,
@@ -436,11 +469,22 @@ def build_stop_pano(
         raise FileNotFoundError(
             f"No posed frames for pano at site={site} drive={drive}"
         )
-    result = stitch_pose_cylinder(
+    # Equirect benefits from more frames for surround fill
+    if projection == "equirect" and max_frames < 48:
+        frames = select_pano_frames(
+            site,
+            drive,
+            instruments=instruments,
+            sol_min=sol_min,
+            sol_max=sol_max,
+            max_frames=min(64, max(max_frames, 48)),
+        )
+    result = stitch_pose_pano(
         frames,
         out_width=out_width,
         thumb_size=thumb_size,
         max_side=max_side,
+        projection=projection,
     )
     result["site"] = site
     result["drive"] = drive

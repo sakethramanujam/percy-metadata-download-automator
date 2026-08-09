@@ -27,6 +27,7 @@ from playground.api.data import (
     stereo_pairs_for_stop,
 )
 from playground.api.basemap import fetch_fub_basemap, list_basemap_layers
+from playground.api.coverage import stop_coverage
 from playground.api.depth import (
     approximate_depth_m,
     camera_cloud_to_body,
@@ -494,6 +495,33 @@ def api_stereo_depth(
     }
 
 
+@app.get("/api/stops/{site}/{drive}/coverage")
+def api_stop_coverage(
+    site: int,
+    drive: int,
+    az_bins: int = Query(72, ge=12, le=360),
+    el_bins: int = Query(36, ge=8, le=180),
+    fill_fov: bool = Query(True, description="Soft-fill FOV footprint on sphere"),
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+    instrument: Optional[list[str]] = Query(None),
+):
+    """Azimuth × elevation pose coverage heatmap for a stop (metadata only)."""
+    try:
+        return stop_coverage(
+            site,
+            drive,
+            az_bins=az_bins,
+            el_bins=el_bins,
+            instruments=instrument,
+            sol_min=sol_min,
+            sol_max=sol_max,
+            fill_fov=fill_fov,
+        )
+    except IndexNotBuiltError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
 @app.get("/api/stops/{site}/{drive}/pano")
 def api_stop_pano(
     site: int,
@@ -511,6 +539,11 @@ def api_stop_pano(
         le=4096,
         description="Cap source image edge (defaults by size tier)",
     ),
+    projection: str = Query(
+        "cylinder",
+        pattern="^(cylinder|equirect)$",
+        description="cylinder = adaptive crop; equirect = full 360×180 export",
+    ),
     instrument: Optional[list[str]] = Query(
         None, description="e.g. NAVCAM_LEFT — default prefers NAVCAM"
     ),
@@ -518,7 +551,7 @@ def api_stop_pano(
     sol_max: Optional[int] = None,
     meta_only: bool = Query(False, description="Return JSON only (no JPEG body)"),
 ):
-    """Pose-driven cylindrical panorama for a stop (body-frame look/up/FOV)."""
+    """Pose-driven panorama for a stop (body-frame look/up/FOV)."""
     if not has_opencv():
         raise HTTPException(status_code=501, detail="OpenCV required for pano encode")
     try:
@@ -532,6 +565,7 @@ def api_stop_pano(
             out_width=out_width,
             thumb_size=size,
             max_side=max_side,
+            projection=projection,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -550,6 +584,7 @@ def api_stop_pano(
         "el_min_deg": result["el_min_deg"],
         "el_span_deg": result["el_span_deg"],
         "method": result["method"],
+        "projection": result.get("projection", projection),
         "frame": result["frame"],
         "elapsed_ms": result["elapsed_ms"],
         "source_size": result.get("source_size"),
@@ -557,7 +592,7 @@ def api_stop_pano(
         "note": result["note"],
         "url": (
             f"/api/stops/{site}/{drive}/pano?max_frames={max_frames}"
-            f"&out_width={out_width}&size={size}"
+            f"&out_width={out_width}&size={size}&projection={projection}"
             + (f"&max_side={max_side}" if max_side else "")
         ),
     }
@@ -567,14 +602,18 @@ def api_stop_pano(
     headers = {
         "X-Pano-Frames": str(result["n_frames"]),
         "X-Pano-Method": str(result["method"]),
+        "X-Pano-Projection": str(result.get("projection", projection)),
         "X-Pano-Az-Span-Deg": f"{result['az_span_deg']:.1f}",
         "X-Pano-Elapsed-Ms": f"{result['elapsed_ms']:.0f}",
         "Cache-Control": "public, max-age=3600",
+        "Content-Disposition": (
+            f'inline; filename="pano_{site}_{drive}_{projection}.jpg"'
+        ),
     }
     return FileResponse(
         result["path"],
         media_type="image/jpeg",
-        filename=f"pano_{site}_{drive}.jpg",
+        filename=f"pano_{site}_{drive}_{projection}.jpg",
         headers=headers,
     )
 

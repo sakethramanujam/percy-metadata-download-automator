@@ -6,6 +6,7 @@ import EyeView from "./EyeView";
 import PanoView from "./PanoView";
 import MapInset from "./MapInset";
 import TourOverlay from "./TourOverlay";
+import CoverageHeatmap from "./CoverageHeatmap";
 import {
   Camera,
   MapWaypoint,
@@ -13,6 +14,7 @@ import {
   StereoPair,
   Stop,
   fetchCameras,
+  fetchCoverage,
   fetchHealth,
   fetchImage,
   fetchMap,
@@ -24,6 +26,8 @@ import {
   fetchStops,
   panoUrl,
   thumbUrl,
+  type CoverageResult,
+  type PanoProjection,
   type PanoSourceSize,
   type StereoPointCloud,
 } from "./api";
@@ -88,6 +92,11 @@ export default function App() {
   const [panoError, setPanoError] = useState<string | null>(null);
   const [panoSrc, setPanoSrc] = useState<string | null>(null);
   const [panoSize, setPanoSize] = useState<PanoSourceSize>("medium");
+  const [panoProjection, setPanoProjection] =
+    useState<PanoProjection>("cylinder");
+  const [coverage, setCoverage] = useState<CoverageResult | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
 
   // NASA MMGIS map localization
   const [waypoints, setWaypoints] = useState<MapWaypoint[]>([]);
@@ -249,7 +258,21 @@ export default function App() {
     setPointCloud(null);
     setDepthPreview(null);
     setDepthMeta(null);
+    setCoverage(null);
+    setCoverageError(null);
     setEyeMode(false);
+    // Coverage is metadata-only — load in parallel with cameras
+    setCoverageLoading(true);
+    fetchCoverage(selectedStop.site, selectedStop.drive)
+      .then((r) => {
+        setCoverage(r);
+        setCoverageError(null);
+      })
+      .catch((e) => {
+        setCoverage(null);
+        setCoverageError(String(e));
+      })
+      .finally(() => setCoverageLoading(false));
     fetchCameras(selectedStop.site, selectedStop.drive)
       .then((r) => {
         setCameras(r.cameras);
@@ -684,7 +707,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTour, tourStep]);
 
-  async function openSitePano(size: PanoSourceSize = panoSize) {
+  async function openSitePano(
+    size: PanoSourceSize = panoSize,
+    projection: PanoProjection = panoProjection
+  ) {
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
       return;
     }
@@ -696,21 +722,48 @@ export default function App() {
       const drive = selectedStop.drive;
       // Higher source tiers → wider output for detail
       const outW =
-        size === "full" ? 8192 : size === "large" ? 6144 : size === "medium" ? 4096 : 3072;
-      const maxFrames = size === "full" || size === "large" ? 32 : 40;
+        projection === "equirect"
+          ? size === "full"
+            ? 8192
+            : size === "large"
+              ? 6144
+              : size === "medium"
+                ? 4096
+                : 2048
+          : size === "full"
+            ? 8192
+            : size === "large"
+              ? 6144
+              : size === "medium"
+                ? 4096
+                : 3072;
+      const maxFrames =
+        projection === "equirect"
+          ? size === "full" || size === "large"
+            ? 48
+            : 56
+          : size === "full" || size === "large"
+            ? 32
+            : 40;
       const meta = await fetchPanoMeta(site, drive, {
         max_frames: maxFrames,
         out_width: outW,
         size,
+        projection,
       });
       setPanoMeta(
-        `${meta.n_frames} frames · ${size}` +
+        `${meta.n_frames} frames · ${projection} · ${size}` +
           (meta.source_max_side ? `≤${meta.source_max_side}px` : "") +
-          ` · az ${meta.az_span_deg.toFixed(0)}° · ${meta.elapsed_ms.toFixed(0)} ms`
+          ` · az ${meta.az_span_deg.toFixed(0)}° · ${meta.width}×${meta.height} · ` +
+          `${meta.elapsed_ms.toFixed(0)} ms`
       );
       setPanoSrc(
-        panoUrl(site, drive, { max_frames: maxFrames, out_width: outW, size }) +
-          `&t=${meta.n_frames}-${size}`
+        panoUrl(site, drive, {
+          max_frames: maxFrames,
+          out_width: outW,
+          size,
+          projection,
+        }) + `&t=${meta.n_frames}-${size}-${projection}`
       );
       setPanoMode(true);
       setEyeMode(false);
@@ -719,6 +772,23 @@ export default function App() {
     } finally {
       setPanoLoading(false);
     }
+  }
+
+  function reloadCoverage() {
+    if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
+      return;
+    }
+    setCoverageLoading(true);
+    setCoverageError(null);
+    fetchCoverage(selectedStop.site, selectedStop.drive, {
+      sol_max: solCursor ?? undefined,
+    })
+      .then((r) => setCoverage(r))
+      .catch((e) => {
+        setCoverage(null);
+        setCoverageError(String(e));
+      })
+      .finally(() => setCoverageLoading(false));
   }
 
   async function runStereoDepth() {
@@ -1062,6 +1132,16 @@ export default function App() {
                 />
               )}
             </div>
+            <h2>
+              Coverage{" "}
+              <span className="muted">az × el · body frame</span>
+            </h2>
+            <CoverageHeatmap
+              data={coverage}
+              loading={coverageLoading}
+              error={coverageError}
+              onRefresh={reloadCoverage}
+            />
           </>
         )}
 
@@ -1194,10 +1274,15 @@ export default function App() {
             imageUrl={panoSrc}
             title={
               selectedStop
-                ? `Pano · site ${selectedStop.site} / drive ${selectedStop.drive}`
+                ? `Pano · ${panoProjection} · site ${selectedStop.site} / drive ${selectedStop.drive}`
                 : "Site panorama"
             }
             meta={panoMeta ?? undefined}
+            downloadName={
+              selectedStop
+                ? `pano_${selectedStop.site}_${selectedStop.drive}_${panoProjection}.jpg`
+                : `pano_${panoProjection}.jpg`
+            }
             onClose={() => setPanoMode(false)}
           />
         ) : eyeMode && selected && selected.pos_x != null ? (
@@ -1270,10 +1355,26 @@ export default function App() {
                     selectedStop.site == null ||
                     selectedStop.drive == null
                   }
-                  onClick={() => openSitePano(panoSize)}
+                  onClick={() => openSitePano(panoSize, panoProjection)}
                 >
-                  {panoLoading ? "Stitching pano…" : "Site panorama"}
+                  {panoLoading
+                    ? "Stitching pano…"
+                    : panoProjection === "equirect"
+                      ? "Equirect pano"
+                      : "Site panorama"}
                 </button>
+                <select
+                  className="pano-size-select"
+                  value={panoProjection}
+                  disabled={panoLoading}
+                  title="cylinder = adaptive crop; equirect = full 360×180 export"
+                  onChange={(e) =>
+                    setPanoProjection(e.target.value as PanoProjection)
+                  }
+                >
+                  <option value="cylinder">cylinder</option>
+                  <option value="equirect">equirect 360°</option>
+                </select>
                 <select
                   className="pano-size-select"
                   value={panoSize}
