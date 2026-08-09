@@ -904,6 +904,20 @@ button.linkish {
   vertical-align: middle;
 }
 
+.pano-align-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  margin-bottom: 4px;
+}
+
+.pano-align-label .pano-size-select {
+  margin-left: 0;
+  width: 100%;
+  padding: 5px 8px;
+}
+
 /* Stop-view geographic map inset (basemap is not body-frame) */
 .map-inset {
   position: absolute;

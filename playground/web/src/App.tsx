@@ -28,6 +28,7 @@ import {
   panoUrl,
   thumbUrl,
   type CoverageResult,
+  type PanoAlign,
   type PanoProjection,
   type PanoSourceSize,
   type StereoPointCloud,
@@ -95,6 +96,8 @@ export default function App() {
   const [panoSize, setPanoSize] = useState<PanoSourceSize>("medium");
   const [panoProjection, setPanoProjection] =
     useState<PanoProjection>("cylinder");
+  /** pose = metadata only; hybrid = pose + ECC/SIFT residual + exposure */
+  const [panoAlign, setPanoAlign] = useState<PanoAlign>("hybrid");
   /** sphere = 3D photo sphere (equirect); flat = 2D drag strip */
   const [panoViewMode, setPanoViewMode] = useState<"sphere" | "flat">("sphere");
   const pendingSphere = useRef(false);
@@ -765,8 +768,8 @@ export default function App() {
     setPanoError(null);
     setPanoMeta(
       asSphere
-        ? `Stitching equirect for photo sphere (${useSize}, ${outW}px)…`
-        : `Stitching ${projection} pano (${useSize})…`
+        ? `Stitching equirect for photo sphere (${useSize}, ${outW}px, ${panoAlign})…`
+        : `Stitching ${projection} pano (${useSize}, ${panoAlign})…`
     );
     try {
       const site = selectedStop.site;
@@ -778,7 +781,7 @@ export default function App() {
           out_width: outW,
           size: useSize,
           projection,
-          align: "hybrid",
+          align: panoAlign,
         }) + `&t=${Date.now()}`;
 
       const r = await fetch(url);
@@ -822,8 +825,10 @@ export default function App() {
         [
           frames ? `${frames} frames` : null,
           projection,
-          alignHdr || "hybrid",
-          feat != null ? `${feat} feature-aligned` : null,
+          alignHdr || panoAlign,
+          feat != null && (alignHdr || panoAlign) !== "pose"
+            ? `${feat} feature-aligned`
+            : null,
           useSize,
           az ? `az ${Number(az).toFixed(0)}°` : null,
           ms ? `${Number(ms).toFixed(0)} ms` : null,
@@ -1232,7 +1237,26 @@ export default function App() {
             <h2>Photo sphere</h2>
             <div className="coverage-panel">
               <div className="muted" style={{ marginBottom: 8, fontSize: "0.78rem" }}>
-                Immersive 360° from pose-driven equirect stitch (navcam-first).
+                360° equirect stitch (navcam-first). Choose how frames are aligned.
+              </div>
+              <label className="pano-align-label">
+                Stitch align
+                <select
+                  className="pano-size-select"
+                  value={panoAlign}
+                  disabled={panoLoading}
+                  title="pose = metadata only; hybrid = pose + feature residual + exposure"
+                  onChange={(e) => setPanoAlign(e.target.value as PanoAlign)}
+                >
+                  <option value="hybrid">hybrid (pose + features)</option>
+                  <option value="feature">feature (same as hybrid)</option>
+                  <option value="pose">pose only</option>
+                </select>
+              </label>
+              <div className="muted" style={{ fontSize: "0.72rem", margin: "4px 0 8px" }}>
+                {panoAlign === "pose"
+                  ? "Place each frame from CAHVOR look/FOV only (faster, more seams)."
+                  : "Pose layout, then ECC/SIFT residual align + exposure match (slower, tighter seams)."}
               </div>
               <button
                 type="button"
@@ -1566,6 +1590,17 @@ export default function App() {
                 >
                   <option value="cylinder">cylinder</option>
                   <option value="equirect">equirect 360°</option>
+                </select>
+                <select
+                  className="pano-size-select"
+                  value={panoAlign}
+                  disabled={panoLoading}
+                  title="pose = metadata only; hybrid = pose + feature residual align"
+                  onChange={(e) => setPanoAlign(e.target.value as PanoAlign)}
+                >
+                  <option value="hybrid">align: hybrid</option>
+                  <option value="feature">align: feature</option>
+                  <option value="pose">align: pose only</option>
                 </select>
                 <select
                   className="pano-size-select"
