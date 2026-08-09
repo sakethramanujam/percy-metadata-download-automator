@@ -1324,80 +1324,8 @@ export default function App() {
             onJump={(i) => goTourStep(i)}
           />
         )}
-        {viewMode === "path" ? (
-          <MissionPath
-            stops={filteredStops.length ? filteredStops : stops}
-            waypoints={waypoints}
-            mapAvailable={mapAvailable}
-            selectedStopId={selectedStop?.stop_id ?? null}
-            onSelectStop={(s) => selectStop(s, false)}
-            onOpenStop={(s) => selectStop(s, true)}
-            showBasemap={showBasemap}
-            basemapLayer={basemapLayer}
-          />
-        ) : viewMode === "site" ? (
-          <>
-            <SiteScene
-              site={selectedStop?.site ?? 0}
-              drives={siteDrives}
-              cameras={siteCameras}
-              originEasting={siteOriginE}
-              originNorthing={siteOriginN}
-              selectedId={selected?.imageid ?? null}
-              focusDrive={selectedStop?.drive ?? null}
-              onSelect={(c) => {
-                setSelected(c);
-                fetchImage(c.imageid)
-                  .then((d) => setDetail(d as Camera))
-                  .catch(() => setDetail(c));
-                // Sync selected stop to this drive when possible
-                if (c.site != null && c.drive != null) {
-                  const hit = stops.find(
-                    (s) => s.site === c.site && s.drive === c.drive
-                  );
-                  if (hit) setSelectedStop(hit);
-                }
-              }}
-              showPhotoWorld={showPhotoWorld}
-              showRays={showRays}
-              maxPlanes={60}
-            />
-            <div className="hud">
-              {siteNote ??
-                (selectedStop
-                  ? `Site ${selectedStop.site} multi-drive world`
-                  : "Select a stop to open its site")}
-              <div className="muted">
-                Shared EN frame (X east, Y up, Z −north) · body poses + MMGIS
-                anchors ·{" "}
-                <button type="button" className="linkish" onClick={openMissionPath}>
-                  ← Mission path
-                </button>
-                {" · "}
-                <button
-                  type="button"
-                  className="linkish"
-                  disabled={!selectedStop}
-                  onClick={() => selectedStop && setViewMode("stop")}
-                >
-                  Stop cameras
-                </button>
-                {selected && (
-                  <>
-                    {" · "}
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => selectedStop && setViewMode("stop")}
-                    >
-                      Open drive {selected.drive} body frame
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </>
-        ) : panoMode && panoSrc && panoViewMode === "sphere" ? (
+        {/* Pano / sphere always wins over path|site|stop so it cannot be buried */}
+        {panoMode && panoSrc && panoViewMode === "sphere" ? (
           <PhotoSphere
             imageUrl={panoSrc}
             title={
@@ -1455,6 +1383,78 @@ export default function App() {
                 : undefined
             }
           />
+        ) : viewMode === "path" ? (
+          <MissionPath
+            stops={filteredStops.length ? filteredStops : stops}
+            waypoints={waypoints}
+            mapAvailable={mapAvailable}
+            selectedStopId={selectedStop?.stop_id ?? null}
+            onSelectStop={(s) => selectStop(s, false)}
+            onOpenStop={(s) => selectStop(s, true)}
+            showBasemap={showBasemap}
+            basemapLayer={basemapLayer}
+          />
+        ) : viewMode === "site" ? (
+          <>
+            <SiteScene
+              site={selectedStop?.site ?? 0}
+              drives={siteDrives}
+              cameras={siteCameras}
+              originEasting={siteOriginE}
+              originNorthing={siteOriginN}
+              selectedId={selected?.imageid ?? null}
+              focusDrive={selectedStop?.drive ?? null}
+              onSelect={(c) => {
+                setSelected(c);
+                fetchImage(c.imageid)
+                  .then((d) => setDetail(d as Camera))
+                  .catch(() => setDetail(c));
+                if (c.site != null && c.drive != null) {
+                  const hit = stops.find(
+                    (s) => s.site === c.site && s.drive === c.drive
+                  );
+                  if (hit) setSelectedStop(hit);
+                }
+              }}
+              showPhotoWorld={showPhotoWorld}
+              showRays={showRays}
+              maxPlanes={60}
+            />
+            <div className="hud">
+              {siteNote ??
+                (selectedStop
+                  ? `Site ${selectedStop.site} multi-drive world`
+                  : "Select a stop to open its site")}
+              <div className="muted">
+                Shared EN frame (X east, Y up, Z −north) · body poses + MMGIS
+                anchors ·{" "}
+                <button type="button" className="linkish" onClick={openMissionPath}>
+                  ← Mission path
+                </button>
+                {" · "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={!selectedStop}
+                  onClick={() => selectedStop && setViewMode("stop")}
+                >
+                  Stop cameras
+                </button>
+                {selected && (
+                  <>
+                    {" · "}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => selectedStop && setViewMode("stop")}
+                    >
+                      Open drive {selected.drive} body frame
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </>
         ) : eyeMode && selected && selected.pos_x != null ? (
           <EyeView
             camera={selected}

@@ -1,27 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useThree, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
 /**
- * Immersive photo sphere: equirectangular JPEG mapped inside a sphere.
- * Pose-driven stitch (body frame: az 0 ≈ forward at image center).
+ * Immersive photo sphere from an equirectangular JPEG (pose-stitched).
+ * Renders as a fixed full-viewport overlay so layout flex cannot zero its height.
  */
 
-const MAX_TEX = 4096; // GTX 1050-class cards choke on 6k+ equirects
+const MAX_TEX = 4096;
 
 function loadEquirectTexture(url: string): Promise<THREE.Texture> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    // crossOrigin on blob: URLs breaks decode in Chromium — only set for http(s)
+    if (/^https?:\/\//i.test(url)) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
       try {
-        let w = img.naturalWidth || img.width;
-        let h = img.naturalHeight || img.height;
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
         if (w < 8 || h < 8) {
-          reject(new Error("pano image too small or empty"));
+          reject(new Error(`pano image too small (${w}×${h})`));
           return;
         }
-        // Downscale oversized textures for WebGL reliability
+
         let dw = w;
         let dh = h;
         if (Math.max(w, h) > MAX_TEX) {
@@ -29,14 +32,13 @@ function loadEquirectTexture(url: string): Promise<THREE.Texture> {
           dw = Math.max(2, Math.round(w * s));
           dh = Math.max(2, Math.round(h * s));
         }
-        // Power-of-two friendly not required for WebGL2, but even dims help
-        dw = dw - (dw % 2);
-        dh = dh - (dh % 2);
+        dw -= dw % 2;
+        dh -= dh % 2;
 
         const canvas = document.createElement("canvas");
         canvas.width = dw;
         canvas.height = dh;
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { willReadFrequently: false });
         if (!ctx) {
           reject(new Error("2d canvas unavailable"));
           return;
@@ -58,23 +60,21 @@ function loadEquirectTexture(url: string): Promise<THREE.Texture> {
       }
     };
     img.onerror = () =>
-      reject(new Error(`Failed to load pano image (${url.slice(0, 80)}…)`));
+      reject(
+        new Error(
+          `Failed to decode pano (${url.startsWith("blob:") ? "blob" : url.slice(0, 64)}…)`
+        )
+      );
     img.src = url;
   });
 }
 
 function SphereMesh({ texture }: { texture: THREE.Texture }) {
-  // Invert X so faces point inward (camera at origin sees the texture).
-  // Do not also set BackSide — that would face outward and look black.
+  // Invert X so FrontSide faces inward around the origin camera.
   return (
     <mesh scale={[-1, 1, 1]}>
-      <sphereGeometry args={[50, 64, 48]} />
-      <meshBasicMaterial
-        map={texture}
-        side={THREE.FrontSide}
-        toneMapped={false}
-        depthWrite={false}
-      />
+      <sphereGeometry args={[500, 64, 40]} />
+      <meshBasicMaterial map={texture} side={THREE.FrontSide} toneMapped={false} />
     </mesh>
   );
 }
@@ -103,7 +103,11 @@ function LookControls({
     const onDown = (e: PointerEvent) => {
       dragging.current = true;
       last.current = { x: e.clientX, y: e.clientY };
-      el.setPointerCapture(e.pointerId);
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
     };
     const onUp = (e: PointerEvent) => {
       dragging.current = false;
@@ -118,17 +122,16 @@ function LookControls({
       const dx = e.clientX - last.current.x;
       const dy = e.clientY - last.current.y;
       last.current = { x: e.clientX, y: e.clientY };
-      const sens = 0.005;
-      const ny = yawRef.current - dx * sens;
+      const sens = 0.0045;
+      setYaw(yawRef.current - dx * sens);
       let np = pitchRef.current - dy * sens;
-      np = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, np));
-      setYaw(ny);
+      np = Math.max(-1.2, Math.min(1.2, np));
       setPitch(np);
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const cam = camera as THREE.PerspectiveCamera;
-      cam.fov = Math.max(40, Math.min(100, cam.fov + e.deltaY * 0.04));
+      cam.fov = Math.max(35, Math.min(110, cam.fov + e.deltaY * 0.05));
       cam.updateProjectionMatrix();
     };
     el.addEventListener("pointerdown", onDown);
@@ -150,11 +153,10 @@ function LookControls({
     const sy = Math.sin(yawRef.current);
     const cp = Math.cos(pitchRef.current);
     const sp = Math.sin(pitchRef.current);
-    // yaw=0,pitch=0 → +Z (forward into texture center after offset)
-    const dir = new THREE.Vector3(sy * cp, sp, cy * cp);
-    camera.position.set(0, 0, 0);
+    // Small offset off exact origin avoids lookAt singularity edge cases
+    camera.position.set(0, 0, 0.01);
     camera.up.set(0, 1, 0);
-    camera.lookAt(dir.x, dir.y, dir.z);
+    camera.lookAt(sy * cp, sp, cy * cp);
   });
 
   return null;
@@ -183,7 +185,9 @@ export default function PhotoSphere({
     "loading"
   );
   const [err, setErr] = useState<string | null>(null);
+  const [useWebGL, setUseWebGL] = useState(true);
   const texRef = useRef<THREE.Texture | null>(null);
+  const loadGen = useRef(0);
 
   useEffect(() => {
     setYaw(0);
@@ -191,11 +195,12 @@ export default function PhotoSphere({
     setLoadState("loading");
     setErr(null);
     setTex(null);
-    let cancelled = false;
+    setUseWebGL(true);
+    const gen = ++loadGen.current;
 
     loadEquirectTexture(imageUrl)
       .then((t) => {
-        if (cancelled) {
+        if (gen !== loadGen.current) {
           t.dispose();
           return;
         }
@@ -205,13 +210,13 @@ export default function PhotoSphere({
         setLoadState("ready");
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (gen !== loadGen.current) return;
         setErr(e instanceof Error ? e.message : String(e));
         setLoadState("error");
       });
 
     return () => {
-      cancelled = true;
+      loadGen.current += 1; // invalidate in-flight
       if (texRef.current) {
         texRef.current.dispose();
         texRef.current = null;
@@ -225,10 +230,8 @@ export default function PhotoSphere({
       const step = 0.08;
       if (e.key === "ArrowLeft") setYaw((y) => y + step);
       if (e.key === "ArrowRight") setYaw((y) => y - step);
-      if (e.key === "ArrowUp")
-        setPitch((p) => Math.min(Math.PI / 2 - 0.05, p + step));
-      if (e.key === "ArrowDown")
-        setPitch((p) => Math.max(-Math.PI / 2 + 0.05, p - step));
+      if (e.key === "ArrowUp") setPitch((p) => Math.min(1.2, p + step));
+      if (e.key === "ArrowDown") setPitch((p) => Math.max(-1.2, p - step));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -259,8 +262,18 @@ export default function PhotoSphere({
     return h;
   }, [yaw]);
 
+  // Flat CSS equirect fallback (always works if texture/blob decoded)
+  const flatStyle =
+    loadState === "ready"
+      ? {
+          backgroundImage: `url(${imageUrl})`,
+          backgroundSize: "cover",
+          backgroundPosition: `${50 - (headingDeg / 360) * 100}% 50%`,
+        }
+      : undefined;
+
   return (
-    <div className="pano-view photo-sphere">
+    <div className="photo-sphere-overlay" role="dialog" aria-label="Photo sphere">
       <div className="pano-chrome top">
         <div>
           <strong>{title || "Photo sphere"}</strong>
@@ -270,13 +283,23 @@ export default function PhotoSphere({
               {" "}
               · heading {headingDeg.toFixed(0)}° · pitch{" "}
               {((pitch * 180) / Math.PI).toFixed(0)}°
+              {!useWebGL ? " · flat fallback" : ""}
             </span>
           )}
         </div>
         <div className="pano-actions">
+          {loadState === "ready" && (
+            <button
+              type="button"
+              onClick={() => setUseWebGL((v) => !v)}
+              title="Toggle 3D sphere vs flat equirect"
+            >
+              {useWebGL ? "Flat fallback" : "3D sphere"}
+            </button>
+          )}
           {onFlat && (
             <button type="button" onClick={onFlat}>
-              Flat view
+              2D pano
             </button>
           )}
           <button type="button" onClick={downloadPano} disabled={downloading}>
@@ -287,21 +310,33 @@ export default function PhotoSphere({
           </button>
         </div>
       </div>
-      <div className="pano-stage sphere-stage">
+
+      <div className="photo-sphere-stage">
         {loadState === "loading" && (
           <div className="sphere-status">
-            Loading sphere texture…
-            <div className="muted" style={{ marginTop: 8, fontSize: "0.8rem" }}>
-              Large equirects may take a moment to decode
+            Loading photo sphere…
+            <div className="muted" style={{ marginTop: 8, fontSize: "0.85rem" }}>
+              Decoding equirect texture
             </div>
           </div>
         )}
+
         {loadState === "error" && (
           <div className="sphere-status error">
             <div>{err || "Failed to load photo sphere"}</div>
             <div className="muted" style={{ marginTop: 8 }}>
-              Try size <strong>medium</strong>, or open Flat view / re-stitch.
+              The JPEG may still open flat:
             </div>
+            <img
+              src={imageUrl}
+              alt="Equirect fallback"
+              style={{
+                maxWidth: "90%",
+                maxHeight: "50vh",
+                marginTop: 12,
+                borderRadius: 8,
+              }}
+            />
             {onFlat && (
               <button
                 type="button"
@@ -309,28 +344,30 @@ export default function PhotoSphere({
                 style={{ marginTop: 12 }}
                 onClick={onFlat}
               >
-                Open flat view
+                Open 2D pano viewer
               </button>
             )}
           </div>
         )}
-        {loadState === "ready" && tex && (
+
+        {loadState === "ready" && useWebGL && tex && (
           <Canvas
-            camera={{
-              fov: 80,
-              near: 0.01,
-              far: 200,
-              position: [0, 0, 0.001],
-            }}
+            className="photo-sphere-canvas"
+            camera={{ fov: 75, near: 0.1, far: 2000, position: [0, 0, 0.1] }}
             gl={{
               antialias: true,
-              powerPreference: "high-performance",
+              alpha: false,
+              powerPreference: "default",
               failIfMajorPerformanceCaveat: false,
             }}
-            dpr={[1, 1.5]}
+            dpr={1}
             onCreated={({ gl }) => {
               gl.setClearColor("#0a0c10");
+              gl.domElement.style.display = "block";
+              gl.domElement.style.width = "100%";
+              gl.domElement.style.height = "100%";
             }}
+            onError={() => setUseWebGL(false)}
           >
             <SphereMesh texture={tex} />
             <LookControls
@@ -341,10 +378,30 @@ export default function PhotoSphere({
             />
           </Canvas>
         )}
+
+        {loadState === "ready" && !useWebGL && (
+          <div
+            className="photo-sphere-flat"
+            style={flatStyle}
+            onPointerDown={(e) => {
+              (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+              (e.target as HTMLElement).dataset.dragx = String(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              const el = e.target as HTMLElement;
+              if (e.buttons !== 1 && e.pressure === 0) return;
+              const prev = Number(el.dataset.dragx || e.clientX);
+              const dx = e.clientX - prev;
+              el.dataset.dragx = String(e.clientX);
+              setYaw((y) => y - dx * 0.005);
+            }}
+          />
+        )}
       </div>
+
       <div className="pano-chrome bottom muted">
-        Drag to look · ←/→/↑/↓ · scroll = FOV · Esc close · Equirect sphere ·
-        body-frame az 0 = forward
+        Drag to look · ←/→/↑/↓ · scroll FOV (3D) · Esc close · equirect · az 0 ≈
+        forward
       </div>
     </div>
   );
