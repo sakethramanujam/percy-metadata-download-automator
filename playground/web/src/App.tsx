@@ -939,59 +939,65 @@ export default function App() {
   return (
     <div className="app">
       <aside className="panel">
-        <h1>Percy Metadata Playground</h1>
-        <div className="toolbar">
-          <div className="muted">{health || "Connecting…"}</div>
-          <div className="muted">{stats}</div>
-          <div className="muted">{mapStats}</div>
-          <div className="view-toggle">
-            <button
-              type="button"
-              className={viewMode === "path" ? "active" : ""}
-              onClick={openMissionPath}
-            >
-              Mission path
-            </button>
-            <button
-              type="button"
-              className={viewMode === "stop" ? "active" : ""}
-              disabled={!selectedStop}
-              onClick={() => selectedStop && setViewMode("stop")}
-            >
-              Stop cameras
-            </button>
-            <button
-              type="button"
-              className={viewMode === "site" ? "active" : ""}
-              disabled={selectedStop?.site == null}
-              onClick={openSiteWorld}
-              title="All drives at this site in shared EN frame"
-            >
-              Site world
-            </button>
-            <button
-              type="button"
-              className={activeTour ? "active" : ""}
-              disabled={!stops.length}
-              onClick={() => (activeTour ? exitTour() : startMissionTour())}
-              title="Guided sol-ordered tour with shareable deep links"
-            >
-              {activeTour ? "Exit tour" : "Guided tour"}
-            </button>
-          </div>
-          <input
-            placeholder="Search stops: site drive sol  ·  e.g. 9 0"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-          <label className="inline-check">
+        <div className="panel-header">
+          <h1>Percy Metadata Playground</h1>
+          <div className="toolbar toolbar-compact">
+            <div className="muted status-lines" title={[health, stats, mapStats].filter(Boolean).join("\n")}>
+              <div>{health || "Connecting…"}</div>
+              {stats && <div className="status-ellipsis">{stats}</div>}
+            </div>
+            <div className="view-toggle">
+              <button
+                type="button"
+                className={viewMode === "path" ? "active" : ""}
+                onClick={openMissionPath}
+              >
+                Path
+              </button>
+              <button
+                type="button"
+                className={viewMode === "stop" ? "active" : ""}
+                disabled={!selectedStop}
+                onClick={() => selectedStop && setViewMode("stop")}
+              >
+                Stop
+              </button>
+              <button
+                type="button"
+                className={viewMode === "site" ? "active" : ""}
+                disabled={selectedStop?.site == null}
+                onClick={openSiteWorld}
+                title="All drives at this site in shared EN frame"
+              >
+                Site
+              </button>
+              <button
+                type="button"
+                className={activeTour ? "active" : ""}
+                disabled={!stops.length}
+                onClick={() => (activeTour ? exitTour() : startMissionTour())}
+                title="Guided sol-ordered tour with shareable deep links"
+              >
+                {activeTour ? "Exit tour" : "Tour"}
+              </button>
+            </div>
             <input
-              type="checkbox"
-              checked={posedOnlyStops}
-              onChange={(e) => setPosedOnlyStops(e.target.checked)}
+              placeholder="Search stops: site drive sol  ·  e.g. 9 0"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
             />
-            Posed only
-          </label>
+            <label className="inline-check">
+              <input
+                type="checkbox"
+                checked={posedOnlyStops}
+                onChange={(e) => setPosedOnlyStops(e.target.checked)}
+              />
+              Posed only
+            </label>
+          </div>
+        </div>
+
+        <div className="panel-body">
           {viewMode === "stop" && (
             <>
               <div className="layers">
@@ -1155,8 +1161,7 @@ export default function App() {
               )}
             </div>
           )}
-        </div>
-        {viewMode === "stop" && (
+          {viewMode === "stop" && (
           <>
             <h2>
               Stereo pairs{" "}
@@ -1294,33 +1299,40 @@ export default function App() {
           </>
         )}
 
-        <h2>Stops</h2>
-        <div className="stop-list">
-          {filteredStops.length === 0 && (
-            <div className="empty">
-              No stops loaded. Build the index:
-              <br />
-              <code>python -m playground.pipeline.build_index</code>
-            </div>
-          )}
-          {filteredStops.map((s) => (
-            <button
-              key={s.stop_id}
-              className={
-                "stop-item" +
-                (selectedStop?.stop_id === s.stop_id ? " active" : "")
-              }
-              onClick={() => selectStop(s)}
-            >
-              <div className="title">
-                site {s.site} · drive {s.drive}
+          <h2 className="stops-heading">
+            Stops{" "}
+            <span className="muted">
+              {filteredStops.length}
+              {filter ? " match" : ""}
+            </span>
+          </h2>
+          <div className="stop-list">
+            {filteredStops.length === 0 && (
+              <div className="empty">
+                No stops loaded. Build the index:
+                <br />
+                <code>python -m playground.pipeline.build_index</code>
               </div>
-              <div className="meta">
-                sols {s.sol_min ?? "?"}–{s.sol_max ?? "?"} · {s.n_posed}/{s.n_images}{" "}
-                posed · MCZ {s.n_mcz} · NAV {s.n_navcam}
-              </div>
-            </button>
-          ))}
+            )}
+            {filteredStops.map((s) => (
+              <button
+                key={s.stop_id}
+                className={
+                  "stop-item" +
+                  (selectedStop?.stop_id === s.stop_id ? " active" : "")
+                }
+                onClick={() => selectStop(s)}
+              >
+                <div className="title">
+                  site {s.site} · drive {s.drive}
+                </div>
+                <div className="meta">
+                  sols {s.sol_min ?? "?"}–{s.sol_max ?? "?"} · {s.n_posed}/
+                  {s.n_images} posed · MCZ {s.n_mcz} · NAV {s.n_navcam}
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       </aside>
 
