@@ -82,7 +82,7 @@ Wrapper (logs under `logs/`):
 crontab -e
 ```
 
-Run every day at 06:00 UTC:
+Run every day at 06:00 UTC (replace with the absolute path to your clone):
 
 ```cron
 0 6 * * * /path/to/percy-metadata-automation/scripts/run_daily.sh
