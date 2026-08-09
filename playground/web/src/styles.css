@@ -725,6 +725,24 @@ button.linkish {
   background: #05070a;
 }
 
+.sphere-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #d0dae6;
+  font-size: 0.95rem;
+  padding: 24px;
+  text-align: center;
+  z-index: 2;
+}
+
+.sphere-status.error {
+  color: #f0a0a0;
+}
+
 .pano-size-select {
   background: var(--panel);
   color: var(--text);

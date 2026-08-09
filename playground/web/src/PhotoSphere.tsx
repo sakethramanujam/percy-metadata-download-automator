@@ -1,35 +1,79 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
-import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
 
 /**
  * Immersive photo sphere: equirectangular JPEG mapped inside a sphere.
- * Texture is pose-driven stitch (body frame: az 0 = +X forward).
- *
- * Three.js sphere UVs place u=0 at +X; we flip geometry so the camera
- * sits inside and drag-look matches natural pan.
+ * Pose-driven stitch (body frame: az 0 ≈ forward at image center).
  */
 
-function SphereMesh({ url }: { url: string }) {
-  const tex = useTexture(url);
-  useEffect(() => {
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
-    tex.minFilter = THREE.LinearMipmapLinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    // Equirect: u=0 left (−180°), u=0.5 forward (0°) in our stitch
-    // SphereGeometry puts u=0 at +X after flip — offset so center = forward
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.offset.x = 0.5; // align az 0 (image center) with look forward
-    tex.needsUpdate = true;
-  }, [tex]);
+const MAX_TEX = 4096; // GTX 1050-class cards choke on 6k+ equirects
 
+function loadEquirectTexture(url: string): Promise<THREE.Texture> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth || img.width;
+        let h = img.naturalHeight || img.height;
+        if (w < 8 || h < 8) {
+          reject(new Error("pano image too small or empty"));
+          return;
+        }
+        // Downscale oversized textures for WebGL reliability
+        let dw = w;
+        let dh = h;
+        if (Math.max(w, h) > MAX_TEX) {
+          const s = MAX_TEX / Math.max(w, h);
+          dw = Math.max(2, Math.round(w * s));
+          dh = Math.max(2, Math.round(h * s));
+        }
+        // Power-of-two friendly not required for WebGL2, but even dims help
+        dw = dw - (dw % 2);
+        dh = dh - (dh % 2);
+
+        const canvas = document.createElement("canvas");
+        canvas.width = dw;
+        canvas.height = dh;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("2d canvas unavailable"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, dw, dh);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        // Image center (az 0) → look forward (+Z after our look math)
+        tex.offset.x = 0.5;
+        tex.needsUpdate = true;
+        resolve(tex);
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    };
+    img.onerror = () =>
+      reject(new Error(`Failed to load pano image (${url.slice(0, 80)}…)`));
+    img.src = url;
+  });
+}
+
+function SphereMesh({ texture }: { texture: THREE.Texture }) {
   return (
     <mesh scale={[-1, 1, 1]}>
-      <sphereGeometry args={[500, 96, 64]} />
-      <meshBasicMaterial map={tex} side={THREE.FrontSide} toneMapped={false} />
+      <sphereGeometry args={[100, 64, 48]} />
+      <meshBasicMaterial
+        map={texture}
+        side={THREE.FrontSide}
+        toneMapped={false}
+        depthWrite={false}
+      />
     </mesh>
   );
 }
@@ -73,9 +117,8 @@ function LookControls({
       const dx = e.clientX - last.current.x;
       const dy = e.clientY - last.current.y;
       last.current = { x: e.clientX, y: e.clientY };
-      // Drag right → look right (increase yaw around +Y)
       const sens = 0.005;
-      let ny = yawRef.current - dx * sens;
+      const ny = yawRef.current - dx * sens;
       let np = pitchRef.current - dy * sens;
       np = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, np));
       setYaw(ny);
@@ -102,29 +145,18 @@ function LookControls({
   }, [camera, gl, setPitch, setYaw]);
 
   useFrame(() => {
-    // Yaw about world up, pitch about local right — apply look direction
     const cy = Math.cos(yawRef.current);
     const sy = Math.sin(yawRef.current);
     const cp = Math.cos(pitchRef.current);
     const sp = Math.sin(pitchRef.current);
-    // Body: +Z three ≈ forward after body map; here sphere is world-aligned
-    // Forward at yaw=0,pitch=0 → +Z (into image center after texture offset)
+    // yaw=0,pitch=0 → +Z (forward into texture center after offset)
     const dir = new THREE.Vector3(sy * cp, sp, cy * cp);
     camera.position.set(0, 0, 0);
-    camera.lookAt(dir);
     camera.up.set(0, 1, 0);
+    camera.lookAt(dir.x, dir.y, dir.z);
   });
 
   return null;
-}
-
-function LoadingFallback() {
-  return (
-    <mesh>
-      <sphereGeometry args={[500, 32, 16]} />
-      <meshBasicMaterial color="#1a2030" side={THREE.BackSide} />
-    </mesh>
-  );
 }
 
 export default function PhotoSphere({
@@ -140,19 +172,50 @@ export default function PhotoSphere({
   meta?: string;
   downloadName?: string;
   onClose: () => void;
-  /** Switch to flat 2D pano view */
   onFlat?: () => void;
 }) {
   const [yaw, setYaw] = useState(0);
   const [pitch, setPitch] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const [tex, setTex] = useState<THREE.Texture | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
+    "loading"
+  );
   const [err, setErr] = useState<string | null>(null);
+  const texRef = useRef<THREE.Texture | null>(null);
 
-  // Reset look when image changes
   useEffect(() => {
     setYaw(0);
     setPitch(0);
+    setLoadState("loading");
     setErr(null);
+    setTex(null);
+    let cancelled = false;
+
+    loadEquirectTexture(imageUrl)
+      .then((t) => {
+        if (cancelled) {
+          t.dispose();
+          return;
+        }
+        if (texRef.current) texRef.current.dispose();
+        texRef.current = t;
+        setTex(t);
+        setLoadState("ready");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e instanceof Error ? e.message : String(e));
+        setLoadState("error");
+      });
+
+    return () => {
+      cancelled = true;
+      if (texRef.current) {
+        texRef.current.dispose();
+        texRef.current = null;
+      }
+    };
   }, [imageUrl]);
 
   useEffect(() => {
@@ -190,8 +253,6 @@ export default function PhotoSphere({
   }
 
   const headingDeg = useMemo(() => {
-    // yaw 0 = forward; positive yaw = left in our drag convention... 
-    // dir uses sy for X so +yaw turns left → heading CW from forward
     let h = (-yaw * 180) / Math.PI;
     h = ((h % 360) + 360) % 360;
     return h;
@@ -203,11 +264,13 @@ export default function PhotoSphere({
         <div>
           <strong>{title || "Photo sphere"}</strong>
           {meta && <span className="muted"> · {meta}</span>}
-          <span className="muted">
-            {" "}
-            · heading {headingDeg.toFixed(0)}° · pitch{" "}
-            {((pitch * 180) / Math.PI).toFixed(0)}°
-          </span>
+          {loadState === "ready" && (
+            <span className="muted">
+              {" "}
+              · heading {headingDeg.toFixed(0)}° · pitch{" "}
+              {((pitch * 180) / Math.PI).toFixed(0)}°
+            </span>
+          )}
         </div>
         <div className="pano-actions">
           {onFlat && (
@@ -224,19 +287,51 @@ export default function PhotoSphere({
         </div>
       </div>
       <div className="pano-stage sphere-stage">
-        {err ? (
-          <div className="status-banner">{err}</div>
-        ) : (
+        {loadState === "loading" && (
+          <div className="sphere-status">
+            Loading sphere texture…
+            <div className="muted" style={{ marginTop: 8, fontSize: "0.8rem" }}>
+              Large equirects may take a moment to decode
+            </div>
+          </div>
+        )}
+        {loadState === "error" && (
+          <div className="sphere-status error">
+            <div>{err || "Failed to load photo sphere"}</div>
+            <div className="muted" style={{ marginTop: 8 }}>
+              Try size <strong>medium</strong>, or open Flat view / re-stitch.
+            </div>
+            {onFlat && (
+              <button
+                type="button"
+                className="export-btn"
+                style={{ marginTop: 12 }}
+                onClick={onFlat}
+              >
+                Open flat view
+              </button>
+            )}
+          </div>
+        )}
+        {loadState === "ready" && tex && (
           <Canvas
-            camera={{ fov: 75, near: 0.1, far: 2000, position: [0, 0, 0.01] }}
-            gl={{ antialias: true }}
+            camera={{
+              fov: 75,
+              near: 0.1,
+              far: 500,
+              position: [0, 0, 0.01],
+            }}
+            gl={{
+              antialias: true,
+              powerPreference: "high-performance",
+              failIfMajorPerformanceCaveat: false,
+            }}
+            dpr={[1, 1.5]}
             onCreated={({ gl }) => {
               gl.setClearColor("#0a0c10");
             }}
           >
-            <Suspense fallback={<LoadingFallback />}>
-              <SphereMesh url={imageUrl} />
-            </Suspense>
+            <SphereMesh texture={tex} />
             <LookControls
               yaw={yaw}
               pitch={pitch}

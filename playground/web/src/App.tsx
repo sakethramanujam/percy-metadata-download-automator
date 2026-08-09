@@ -722,57 +722,98 @@ export default function App() {
     const asSphere = Boolean(opts?.asSphere);
     if (asSphere) projection = "equirect";
 
+    // Cap sphere resolution — 6k+ equirect OOMs WebGL on 4GB GPUs
+    let useSize = size;
+    let outW: number;
+    if (projection === "equirect") {
+      if (asSphere && (size === "full" || size === "large")) {
+        useSize = "medium";
+      }
+      outW =
+        useSize === "full"
+          ? 4096
+          : useSize === "large"
+            ? 4096
+            : useSize === "medium"
+              ? 3072
+              : 2048;
+    } else {
+      outW =
+        size === "full"
+          ? 8192
+          : size === "large"
+            ? 6144
+            : size === "medium"
+              ? 4096
+              : 3072;
+    }
+    const maxFrames =
+      projection === "equirect"
+        ? useSize === "full" || useSize === "large"
+          ? 40
+          : 48
+        : size === "full" || size === "large"
+          ? 32
+          : 40;
+
     setPanoLoading(true);
     setPanoError(null);
-    setPanoMeta(null);
+    setPanoMeta(
+      asSphere
+        ? `Stitching equirect for photo sphere (${useSize}, ${outW}px)…`
+        : `Stitching ${projection} pano (${useSize})…`
+    );
     try {
       const site = selectedStop.site;
       const drive = selectedStop.drive;
-      // Higher source tiers → wider output for detail
-      const outW =
-        projection === "equirect"
-          ? size === "full"
-            ? 8192
-            : size === "large"
-              ? 6144
-              : size === "medium"
-                ? 4096
-                : 2048
-          : size === "full"
-            ? 8192
-            : size === "large"
-              ? 6144
-              : size === "medium"
-                ? 4096
-                : 3072;
-      const maxFrames =
-        projection === "equirect"
-          ? size === "full" || size === "large"
-            ? 48
-            : 56
-          : size === "full" || size === "large"
-            ? 32
-            : 40;
-      const meta = await fetchPanoMeta(site, drive, {
-        max_frames: maxFrames,
-        out_width: outW,
-        size,
-        projection,
-      });
-      setPanoMeta(
-        `${meta.n_frames} frames · ${projection} · ${size}` +
-          (meta.source_max_side ? `≤${meta.source_max_side}px` : "") +
-          ` · az ${meta.az_span_deg.toFixed(0)}° · ${meta.width}×${meta.height} · ` +
-          `${meta.elapsed_ms.toFixed(0)} ms`
-      );
-      setPanoSrc(
+      // Single JPEG fetch (meta_only still stitches — don't double-pay)
+      const url =
         panoUrl(site, drive, {
           max_frames: maxFrames,
           out_width: outW,
-          size,
+          size: useSize,
           projection,
-        }) + `&t=${meta.n_frames}-${size}-${projection}`
+        }) + `&t=${Date.now()}`;
+
+      const r = await fetch(url);
+      if (!r.ok) {
+        const detail = await r.text();
+        throw new Error(`${r.status} ${detail.slice(0, 200)}`);
+      }
+      const blob = await r.blob();
+      if (!blob.size || !blob.type.includes("image")) {
+        // Some proxies return JSON error as 200 with wrong type
+        const text = await blob.text();
+        throw new Error(`expected JPEG, got: ${text.slice(0, 160)}`);
+      }
+      // Prefer blob URL so TextureLoader doesn't re-hit a slow endpoint
+      const objUrl = URL.createObjectURL(blob);
+      // Revoke previous blob if any
+      if (panoSrc?.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(panoSrc);
+        } catch {
+          /* ignore */
+        }
+      }
+      const frames = r.headers.get("X-Pano-Frames");
+      const method = r.headers.get("X-Pano-Method");
+      const az = r.headers.get("X-Pano-Az-Span-Deg");
+      const ms = r.headers.get("X-Pano-Elapsed-Ms");
+      setPanoMeta(
+        [
+          frames ? `${frames} frames` : null,
+          projection,
+          useSize,
+          az ? `az ${Number(az).toFixed(0)}°` : null,
+          ms ? `${Number(ms).toFixed(0)} ms` : null,
+          method,
+          asSphere && size !== useSize ? `(capped from ${size})` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
       );
+      setPanoSrc(objUrl);
       setPanoProjection(projection);
       setPanoViewMode(
         asSphere || projection === "equirect" ? "sphere" : "flat"
@@ -781,13 +822,17 @@ export default function App() {
       setEyeMode(false);
     } catch (e) {
       setPanoError(String(e));
+      setPanoMeta(null);
     } finally {
       setPanoLoading(false);
     }
   }
 
   function openPhotoSphere() {
-    void openSitePano(panoSize, "equirect", { asSphere: true });
+    // Prefer medium for reliable WebGL upload
+    const size: PanoSourceSize =
+      panoSize === "full" || panoSize === "large" ? "medium" : panoSize;
+    void openSitePano(size, "equirect", { asSphere: true });
   }
 
   function reloadCoverage() {
@@ -1299,7 +1344,17 @@ export default function App() {
                 ? `sphere_${selectedStop.site}_${selectedStop.drive}_equirect.jpg`
                 : "photo_sphere.jpg"
             }
-            onClose={() => setPanoMode(false)}
+            onClose={() => {
+              if (panoSrc?.startsWith("blob:")) {
+                try {
+                  URL.revokeObjectURL(panoSrc);
+                } catch {
+                  /* ignore */
+                }
+              }
+              setPanoMode(false);
+              setPanoSrc(null);
+            }}
             onFlat={() => setPanoViewMode("flat")}
           />
         ) : panoMode && panoSrc ? (
@@ -1316,7 +1371,17 @@ export default function App() {
                 ? `pano_${selectedStop.site}_${selectedStop.drive}_${panoProjection}.jpg`
                 : `pano_${panoProjection}.jpg`
             }
-            onClose={() => setPanoMode(false)}
+            onClose={() => {
+              if (panoSrc?.startsWith("blob:")) {
+                try {
+                  URL.revokeObjectURL(panoSrc);
+                } catch {
+                  /* ignore */
+                }
+              }
+              setPanoMode(false);
+              setPanoSrc(null);
+            }}
             onSphere={
               panoProjection === "equirect"
                 ? () => setPanoViewMode("sphere")
