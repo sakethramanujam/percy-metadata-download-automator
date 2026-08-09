@@ -774,6 +774,135 @@ button.linkish {
   text-align: left;
 }
 
+/* Guided tour overlay */
+.tour-overlay {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 14px;
+  z-index: 8;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 12px 14px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(10, 14, 20, 0.92);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+}
+
+.tour-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tour-brand {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.tour-kicker {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tour-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.tour-close:hover {
+  border-color: var(--accent);
+}
+
+.tour-progress {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  margin: 8px 0 10px;
+  overflow: hidden;
+}
+
+.tour-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #4db6ac, #e8a838);
+  transition: width 0.25s ease;
+}
+
+.tour-step-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+}
+
+.tour-caption {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #d0dae6;
+}
+
+.tour-meta {
+  font-size: 0.72rem;
+  margin-bottom: 8px;
+}
+
+.tour-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.tour-controls button {
+  background: #1a2430;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.tour-controls button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.tour-controls button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tour-jump {
+  background: #1a2430;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 0.72rem;
+  max-width: 160px;
+}
+
+.tour-hint {
+  margin-top: 8px;
+  font-size: 0.68rem;
+}
+
 @media (max-width: 1100px) {
   .app {
     grid-template-columns: 280px 1fr;

@@ -5,6 +5,7 @@ import MissionPath from "./MissionPath";
 import EyeView from "./EyeView";
 import PanoView from "./PanoView";
 import MapInset from "./MapInset";
+import TourOverlay from "./TourOverlay";
 import {
   Camera,
   MapWaypoint,
@@ -27,6 +28,12 @@ import {
   type StereoPointCloud,
 } from "./api";
 import { bodyTupleToThreeAligned } from "./coords";
+import {
+  buildMissionHighlightTour,
+  parseTourFromUrl,
+  type Tour,
+  type TourStep,
+} from "./tours";
 
 type ViewMode = "path" | "stop" | "site";
 
@@ -104,7 +111,14 @@ export default function App() {
   const [siteOriginN, setSiteOriginN] = useState<number | null>(null);
   const [siteLoading, setSiteLoading] = useState(false);
   const [siteNote, setSiteNote] = useState<string | null>(null);
+  // Guided tour
+  const [activeTour, setActiveTour] = useState<Tour | null>(null);
+  const [tourStep, setTourStep] = useState(0);
+  const [tourPlaying, setTourPlaying] = useState(false);
+  const tourTimer = useRef<number | null>(null);
+  const applyTourStepRef = useRef<(step: TourStep) => void>(() => {});
   const bootstrapped = useRef(false);
+  const pendingTour = useRef<{ tourId: string; step: number } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -142,6 +156,8 @@ export default function App() {
         const siteParam = params.get("site");
         const driveParam = params.get("drive");
         const imageParam = params.get("image");
+        const tourFromUrl = parseTourFromUrl();
+        if (tourFromUrl) pendingTour.current = tourFromUrl;
         let resolved: Stop | null = null;
         if (siteParam != null && driveParam != null) {
           const site = Number(siteParam);
@@ -167,6 +183,14 @@ export default function App() {
             imageParam;
         }
         bootstrapped.current = true;
+        // Resume deep-linked tour once stops are ready
+        if (tourFromUrl?.tourId === "mission-highlights") {
+          const tour = buildMissionHighlightTour(ordered);
+          setActiveTour(tour);
+          setTourStep(
+            Math.min(tourFromUrl.step, Math.max(0, tour.steps.length - 1))
+          );
+        }
 
         try {
           const m = await fetchMap();
@@ -200,12 +224,16 @@ export default function App() {
     if (selectedStop?.site != null) params.set("site", String(selectedStop.site));
     if (selectedStop?.drive != null) params.set("drive", String(selectedStop.drive));
     if (selected?.imageid) params.set("image", selected.imageid);
+    if (activeTour) {
+      params.set("tour", activeTour.id);
+      params.set("step", String(tourStep));
+    }
     const qs = params.toString();
     const next = `${window.location.pathname}?${qs}`;
     if (next !== `${window.location.pathname}${window.location.search}`) {
       window.history.replaceState(null, "", next);
     }
-  }, [viewMode, selectedStop, selected]);
+  }, [viewMode, selectedStop, selected, activeTour, tourStep]);
 
   useEffect(() => {
     if (viewMode !== "stop") return;
@@ -233,7 +261,7 @@ export default function App() {
         } else {
           setSolCursor(selectedStop.sol_max ?? null);
         }
-        // Deep-link image select
+        // Deep-link / tour image select
         const pending = (window as unknown as { __percyPendingImage?: string })
           .__percyPendingImage;
         if (pending) {
@@ -242,6 +270,13 @@ export default function App() {
             setSelected(hit);
             setFlyTo(hit);
             setFlyToken((t) => t + 1);
+            const wantEye = (window as unknown as { __percyPendingEye?: boolean })
+              .__percyPendingEye;
+            if (wantEye) {
+              setEyeMode(true);
+              delete (window as unknown as { __percyPendingEye?: boolean })
+                .__percyPendingEye;
+            }
           }
           delete (window as unknown as { __percyPendingImage?: string })
             .__percyPendingImage;
@@ -512,6 +547,143 @@ export default function App() {
     setViewMode("site");
   }
 
+  function resolveStop(site?: number | null, drive?: number | null): Stop | null {
+    if (site == null) return null;
+    if (drive != null) {
+      return stops.find((s) => s.site === site && s.drive === drive) ?? null;
+    }
+    return stops.find((s) => s.site === site) ?? null;
+  }
+
+  function applyTourStep(step: TourStep) {
+    setEyeMode(false);
+    setPanoMode(false);
+    setPlaying(false);
+    if (step.type === "path") {
+      setViewMode("path");
+      const hit = resolveStop(step.site, step.drive);
+      if (hit) setSelectedStop(hit);
+      return;
+    }
+    if (step.type === "site") {
+      const hit = resolveStop(step.site, step.drive);
+      if (hit) setSelectedStop(hit);
+      setViewMode("site");
+      return;
+    }
+    // stop | camera | eye | pano
+    const hit = resolveStop(step.site, step.drive);
+    if (hit) {
+      setSelectedStop(hit);
+      setViewMode("stop");
+    }
+    if (step.imageid) {
+      (window as unknown as { __percyPendingImage?: string }).__percyPendingImage =
+        step.imageid;
+      // If cameras already loaded for this stop, select immediately
+      const cam = cameras.find((c) => c.imageid === step.imageid);
+      if (cam) {
+        setSelected(cam);
+        setFlyTo(cam);
+        setFlyToken((t) => t + 1);
+        if (step.type === "eye") setEyeMode(true);
+      } else if (step.type === "eye") {
+        // eye after cameras load
+        (window as unknown as { __percyPendingEye?: boolean }).__percyPendingEye =
+          true;
+      }
+    }
+    if (step.type === "pano" && hit?.site != null && hit.drive != null) {
+      // fire-and-forget pano open
+      void openSitePano(panoSize);
+    }
+  }
+  applyTourStepRef.current = applyTourStep;
+
+  function startMissionTour() {
+    const tour = buildMissionHighlightTour(stops.length ? stops : pathStops);
+    setActiveTour(tour);
+    setTourStep(0);
+    setTourPlaying(false);
+    applyTourStep(tour.steps[0]);
+  }
+
+  function exitTour() {
+    setActiveTour(null);
+    setTourPlaying(false);
+    setTourStep(0);
+    if (tourTimer.current) {
+      window.clearTimeout(tourTimer.current);
+      tourTimer.current = null;
+    }
+  }
+
+  function goTourStep(next: number) {
+    if (!activeTour) return;
+    const i = Math.max(0, Math.min(activeTour.steps.length - 1, next));
+    setTourStep(i);
+    applyTourStep(activeTour.steps[i]);
+  }
+
+  // Apply step when tour starts / step changes from deep link after bootstrap
+  useEffect(() => {
+    if (!activeTour || !bootstrapped.current) return;
+    const step = activeTour.steps[tourStep];
+    if (step) applyTourStepRef.current(step);
+    // only re-apply when tour id or step index changes externally
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTour?.id, tourStep]);
+
+  // Auto-advance when tour is playing
+  useEffect(() => {
+    if (!activeTour || !tourPlaying) {
+      if (tourTimer.current) {
+        window.clearTimeout(tourTimer.current);
+        tourTimer.current = null;
+      }
+      return;
+    }
+    const step = activeTour.steps[tourStep];
+    const dwell = step?.dwellMs && step.dwellMs > 0 ? step.dwellMs : 4500;
+    tourTimer.current = window.setTimeout(() => {
+      if (tourStep >= activeTour.steps.length - 1) {
+        setTourPlaying(false);
+        return;
+      }
+      goTourStep(tourStep + 1);
+    }, dwell);
+    return () => {
+      if (tourTimer.current) window.clearTimeout(tourTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTour, tourPlaying, tourStep]);
+
+  // Keyboard for tour
+  useEffect(() => {
+    if (!activeTour) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        exitTour();
+      } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        goTourStep(tourStep + 1);
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        goTourStep(tourStep - 1);
+      } else if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        setTourPlaying((p) => !p);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTour, tourStep]);
+
   async function openSitePano(size: PanoSourceSize = panoSize) {
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
       return;
@@ -624,6 +796,15 @@ export default function App() {
               title="All drives at this site in shared EN frame"
             >
               Site world
+            </button>
+            <button
+              type="button"
+              className={activeTour ? "active" : ""}
+              disabled={!stops.length}
+              onClick={() => (activeTour ? exitTour() : startMissionTour())}
+              title="Guided sol-ordered tour with shareable deep links"
+            >
+              {activeTour ? "Exit tour" : "Guided tour"}
             </button>
           </div>
           <input
@@ -921,6 +1102,19 @@ export default function App() {
         )}
         {siteLoading && viewMode === "site" && (
           <div className="status-banner">Loading site multi-drive world…</div>
+        )}
+        {activeTour && activeTour.steps[tourStep] && (
+          <TourOverlay
+            tour={activeTour}
+            stepIndex={tourStep}
+            step={activeTour.steps[tourStep]}
+            playing={tourPlaying}
+            onPrev={() => goTourStep(tourStep - 1)}
+            onNext={() => goTourStep(tourStep + 1)}
+            onTogglePlay={() => setTourPlaying((p) => !p)}
+            onClose={exitTour}
+            onJump={(i) => goTourStep(i)}
+          />
         )}
         {viewMode === "path" ? (
           <MissionPath
