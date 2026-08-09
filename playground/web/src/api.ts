@@ -69,9 +69,22 @@ export type Camera = {
   look_x: number | null;
   look_y: number | null;
   look_z: number | null;
+  up_x?: number | null;
+  up_y?: number | null;
+  up_z?: number | null;
+  right_x?: number | null;
+  right_y?: number | null;
+  right_z?: number | null;
   yaw_rad: number | null;
+  pitch_rad?: number | null;
+  roll_rad?: number | null;
+  quat_w?: number | null;
+  quat_x?: number | null;
+  quat_y?: number | null;
+  quat_z?: number | null;
   hfov_deg: number | null;
   vfov_deg: number | null;
+  basis_source?: string | null;
   has_pose: boolean;
   model_type: string;
   model_ok: boolean;
@@ -175,6 +188,65 @@ export function fetchMap() {
   }>("/api/map");
 }
 
+export type PanoSourceSize = "small" | "medium" | "large" | "full";
+
+/** Pose-driven cylindrical pano for a stop (returns image URL + optional meta). */
+export function panoUrl(
+  site: number,
+  drive: number,
+  opts?: {
+    max_frames?: number;
+    out_width?: number;
+    size?: PanoSourceSize;
+  }
+) {
+  const params = new URLSearchParams({
+    max_frames: String(opts?.max_frames ?? 40),
+    out_width: String(opts?.out_width ?? 4096),
+    size: opts?.size ?? "medium",
+  });
+  return `/api/stops/${site}/${drive}/pano?${params}`;
+}
+
+export function fetchPanoMeta(
+  site: number,
+  drive: number,
+  opts?: {
+    max_frames?: number;
+    out_width?: number;
+    size?: PanoSourceSize;
+  }
+) {
+  const params = new URLSearchParams({
+    max_frames: String(opts?.max_frames ?? 40),
+    out_width: String(opts?.out_width ?? 4096),
+    size: opts?.size ?? "medium",
+    meta_only: "true",
+  });
+  return getJson<{
+    site: number;
+    drive: number;
+    n_frames: number;
+    frames: Array<{
+      imageid: string;
+      instrument: string;
+      sol: number | null;
+      az_deg: number;
+      el_deg: number;
+    }>;
+    width: number;
+    height: number;
+    az_span_deg: number;
+    el_span_deg: number;
+    method: string;
+    frame: string;
+    elapsed_ms: number;
+    source_size?: string;
+    source_max_side?: number;
+    note: string;
+  }>(`/api/stops/${site}/${drive}/pano?${params}`);
+}
+
 export function fetchStereoPairs(
   site: number,
   drive: number,
@@ -191,4 +263,63 @@ export function fetchStereoPairs(
     n_pairs: number;
     pairs: StereoPair[];
   }>(`/api/stops/${site}/${drive}/stereo-pairs?${params}`);
+}
+
+export type StereoPointCloud = {
+  n: number;
+  points: number[][];
+  colors?: number[][] | null;
+  frame?: string;
+  origin?: number[];
+  shape?: number[];
+  left_imageid?: string;
+  note?: string;
+};
+
+export type StereoDepthResult = {
+  pair_id: string;
+  left_imageid: string;
+  right_imageid: string;
+  baseline_m: number | null;
+  shape: number[];
+  stats: {
+    n_valid?: number;
+    n_pixels?: number;
+    valid_frac?: number;
+    disp_min?: number | null;
+    disp_max?: number | null;
+    disp_mean?: number | null;
+    disp_median?: number | null;
+  };
+  preview_data_url: string;
+  approx_depth_m_median?: number | null;
+  backend?: string;
+  device?: string;
+  elapsed_ms?: number;
+  point_cloud?: StereoPointCloud | null;
+  note?: string;
+};
+
+/** Stereo depth: disparity preview + optional body-frame point cloud. */
+export function fetchStereoDepth(
+  site: number,
+  drive: number,
+  pairId: string,
+  opts?: {
+    size?: "small" | "medium";
+    pointCloud?: boolean;
+    maxPoints?: number;
+    preferGpu?: boolean;
+  }
+) {
+  const params = new URLSearchParams({
+    pair_id: pairId,
+    size: opts?.size ?? "small",
+    point_cloud: opts?.pointCloud === false ? "false" : "true",
+    max_points: String(opts?.maxPoints ?? 20000),
+    prefer_gpu: opts?.preferGpu === false ? "false" : "true",
+  });
+  return getJson<StereoDepthResult>(
+    `/api/stops/${site}/${drive}/stereo-depth?${params}`
+  );
 }

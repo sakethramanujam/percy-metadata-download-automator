@@ -71,11 +71,15 @@ Vite proxies `/api` to the backend on this machine.
 - Instrument **layers** (NAVCAM / MCZ / HAZCAM / OTHER)
 - **Sol timeline** slider with histogram, Play/Pause progressive reveal
 - 3D poses, look **rays**, optional multi **frustums**
+- **Photo world**: FOV-matched image planes at true body-frame poses per stop (navcam-first, angular diversity, ~40 planes)
 - Hover labels, click to select, **Fly to camera**
 - Inspector with proxied NASA thumbnail
 - **Stereo pairs**: ranked L/R Navcam–MCZ–Hazcam matches, teal baseline in 3D, side-by-side thumbs, JSON export
-- **Mission path mode**: schematic 3D trail of `(site, drive)` stops ordered by sol (not map coordinates); click a node to open that stop’s local camera cloud
+- **Mission path mode**: MMGIS Jezero traverse (easting/northing) with **FU Berlin orbital basemap** (CTX/HiRISE/HRSC via proxied WMS); click to place rover, double-click to open stop cameras
+- **Deep links**: URL `?view=path|stop&site=&drive=&image=` stays in sync for sharing
+- **Stop search**: multi-token filter (`9 0`, sol, rmc) + “posed only”
 - **Rover eye view**: first-person look through a selected image (FOV-matched photo plane); drag to look; ←/→ step images
+- **Stereo depth + body-frame point cloud**: GPU/CPU disparity for a selected L/R pair; back-project into rover body frame and render as a textured 3D cloud in stop view
 - **Perseverance 3D model** (NASA/JPL-Caltech glTF) on the mission path (selected/latest waypoint) and in stop camera view
 
 ## Rover 3D model
@@ -91,16 +95,17 @@ Official asset from [NASA Science](https://science.nasa.gov/resource/mars-persev
 ### Stop / eye view (aligned to the GLB)
 
 Raw-image poses use a rover body frame (**+X** forward, **+Y** right, **+Z** down).  
-The official Perseverance GLB is authored as **+X** right, **+Y** up, **+Z** forward (meters, origin near the ground).
+The official Perseverance GLB is authored as **+X** right, **+Y** up, **+Z** forward (meters, origin near the ground). The RSM/mast is on the **−X** side of that model.
 
-We map poses into that same frame:
+Stop view uses a single rigid map (1:1 meters, no mesh mirror, no per-part motion):
 
 ```text
-three = (body.y, -body.z, body.x)   # right, up, forward
+three = (−body.y, −body.z, body.x)   # left, up, forward
 ```
 
-so Navcam/Mastcam rays start near the mast head and hazcams near the chassis cameras.  
-The mesh is loaded **without re-centering** in stop view (native origin preserved). Map yaw is **not** applied here.
+plus a small chassis registration offset so fixed hazcams sit near the mesh.
+
+The model stays in its **rest pose** — we do **not** animate mast, head, or arm for individual images. True CAHVOR centers still move with real mast/arm pointing, so mast rays form a small cloud around the static head when many pointings are shown at once. That is expected.
 
 ### Mission path
 
@@ -117,6 +122,9 @@ Uses MMGIS **easting/northing** (+ map yaw). Separate from stop-local body/GLB f
 | `GET /api/images/{imageid}` | Full metadata row |
 | `GET /api/images/{imageid}/thumb?size=small` | Proxied/cached image |
 | `GET /api/stops/{site}/{drive}/stereo-pairs` | Ranked L/R stereo candidates |
+| `GET /api/stops/{site}/{drive}/stereo-depth?pair_id=` | SGBM disparity preview (needs OpenCV) |
+| `GET /api/map/basemap?layer=ctx` | FU Berlin Jezero WMS JPEG (waypoint lon/lat hull) |
+| `GET /api/map/basemap/layers` | Available basemap layer keys (ctx/hirise/hrsc/base) |
 
 ## Tests
 

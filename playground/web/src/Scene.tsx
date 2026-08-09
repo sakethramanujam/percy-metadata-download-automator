@@ -5,7 +5,14 @@ import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { Camera } from "./api";
 import RoverModel from "./RoverModel";
-import { bodyDirToThree, bodyPosToThree } from "./coords";
+import PhotoWorld from "./PhotoWorld";
+import PointCloud, { type BodyPointCloud } from "./PointCloud";
+import {
+  bodyDirToThreeAligned as bodyDirToThree,
+  bodyPosToThreeAligned as bodyPosToThree,
+  bodyRightToThreeAligned as bodyRightToThree,
+  bodyUpToThreeAligned as bodyUpToThree,
+} from "./coords";
 
 const INSTRUMENT_COLORS: Record<string, string> = {
   NAVCAM_LEFT: "#4fc3f7",
@@ -208,13 +215,15 @@ function SelectedFrustum({
   const hw = Math.tan(hfov / 2) * depth;
   const hh = Math.tan(vfov / 2) * depth;
 
-  const upGuess = new THREE.Vector3(0, 1, 0);
-  let right = new THREE.Vector3().crossVectors(look, upGuess);
+  // Full orientation from CAHVOR H/V + attitude-refined up
+  let right = bodyRightToThree(camera);
+  let realUp = bodyUpToThree(camera);
+  right = new THREE.Vector3().crossVectors(look, realUp);
   if (right.lengthSq() < 1e-8) {
-    right = new THREE.Vector3().crossVectors(look, new THREE.Vector3(1, 0, 0));
+    right = new THREE.Vector3().crossVectors(look, new THREE.Vector3(0, 1, 0));
   }
   right.normalize();
-  const realUp = new THREE.Vector3().crossVectors(right, look).normalize();
+  realUp = new THREE.Vector3().crossVectors(right, look).normalize();
   const center = origin.clone().add(look.clone().multiplyScalar(depth));
   const corners = [
     center.clone().addScaledVector(right, hw).addScaledVector(realUp, hh),
@@ -311,7 +320,9 @@ function CameraController({
     fromTarget: THREE.Vector3;
     toTarget: THREE.Vector3;
   } | null>(null);
-  const lastFly = useRef(0);
+  // Queue fly in a ref so React StrictMode double-effects still animate once
+  const pendingFly = useRef<{ token: number; cam: Camera } | null>(null);
+  const startedToken = useRef(0);
 
   useEffect(() => {
     if (!controls.current || cameras.length === 0) return;
@@ -340,40 +351,56 @@ function CameraController({
   }, [cameras, frameToken]);
 
   useEffect(() => {
-    if (!flyTo || !controls.current || flyToken === lastFly.current) return;
+    // Intended: move the orbit camera behind the selected rover camera and
+    // look along its look vector (so you see the photo plane / frustum head-on).
+    if (!flyTo || flyToken <= 0) return;
     if (flyTo.pos_x == null) return;
-    lastFly.current = flyToken;
-
-    const target = toThree(flyTo);
-    const look = lookThree(flyTo);
-    const back = look.clone().multiplyScalar(-1.2);
-    const toPos = target.clone().add(back).add(new THREE.Vector3(0, 0.45, 0));
-    const cam = controls.current.object;
-
-    anim.current = {
-      t: 0,
-      fromPos: cam.position.clone(),
-      toPos,
-      fromTarget: controls.current.target.clone(),
-      toTarget: target.clone().add(look.clone().multiplyScalar(0.3)),
-    };
+    pendingFly.current = { token: flyToken, cam: flyTo };
   }, [flyTo, flyToken]);
 
   useFrame((_, dt) => {
-    if (!anim.current || !controls.current) return;
-    anim.current.t = Math.min(1, anim.current.t + dt * 1.6);
+    const ctl = controls.current;
+    if (!ctl) return;
+
+    // Start a queued fly as soon as OrbitControls exists
+    const pending = pendingFly.current;
+    if (pending && pending.token !== startedToken.current) {
+      startedToken.current = pending.token;
+      pendingFly.current = null;
+
+      const target = toThree(pending.cam);
+      const look = lookThree(pending.cam);
+      // Stand behind the camera, slightly above, looking past the origin along look
+      const back = look.clone().multiplyScalar(-2.2);
+      const toPos = target
+        .clone()
+        .add(back)
+        .add(new THREE.Vector3(0, 0.7, 0));
+      const toTarget = target.clone().add(look.clone().multiplyScalar(1.2));
+
+      anim.current = {
+        t: 0,
+        fromPos: ctl.object.position.clone(),
+        toPos,
+        fromTarget: ctl.target.clone(),
+        toTarget,
+      };
+    }
+
+    if (!anim.current) return;
+    anim.current.t = Math.min(1, anim.current.t + dt * 1.4);
     const t = 1 - Math.pow(1 - anim.current.t, 3);
-    controls.current.object.position.lerpVectors(
+    ctl.object.position.lerpVectors(
       anim.current.fromPos,
       anim.current.toPos,
       t
     );
-    controls.current.target.lerpVectors(
+    ctl.target.lerpVectors(
       anim.current.fromTarget,
       anim.current.toTarget,
       t
     );
-    controls.current.update();
+    ctl.update();
     if (anim.current.t >= 1) anim.current = null;
   });
 
@@ -401,6 +428,10 @@ export default function Scene({
   pairIds,
   pairBaseline,
   showRover = true,
+  showPhotoWorld = true,
+  photoWorldMax = 40,
+  pointCloud = null,
+  showPointCloud = true,
 }: {
   cameras: Camera[];
   selectedId: string | null;
@@ -415,6 +446,12 @@ export default function Scene({
   /** Unused in stop view: cameras are body-frame, not map-yawed. */
   roverYawDeg?: number | null;
   showRover?: boolean;
+  /** Place FOV-matched image planes at each camera pose (site photo world). */
+  showPhotoWorld?: boolean;
+  photoWorldMax?: number;
+  /** Stereo body-frame cloud from selected L/R pair. */
+  pointCloud?: BodyPointCloud | null;
+  showPointCloud?: boolean;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const pairSet = pairIds ?? new Set<string>();
@@ -422,18 +459,20 @@ export default function Scene({
   // Camera poses share the GLB authoring frame (meters). Rover stays at origin.
   const roverPos: [number, number, number] = [0, 0, 0];
 
+  // When photo world is on, dial back dense rays so the images read clearly
+  const raysOn = showRays && !showPhotoWorld;
+
   return (
     <Canvas
       camera={{ position: [3.5, 2.2, 4], fov: 50, near: 0.01, far: 300 }}
       onPointerMissed={() => setHoveredId(null)}
     >
       <color attach="background" args={["#0b0f14"]} />
-      <ambientLight intensity={0.65} />
+      <ambientLight intensity={0.75} />
       <directionalLight position={[5, 8, 3]} intensity={0.85} />
-      <hemisphereLight args={["#c5d4e8", "#4a3728", 0.3]} />
+      <hemisphereLight args={["#c5d4e8", "#4a3728", 0.35]} />
       <RaycasterTuning />
       <GroundGrid />
-      {/* Axes match GLB: X right (red), Y up (green), Z forward (blue) */}
       <axesHelper args={[1.5]} />
       {showRover && (
         <Suspense fallback={null}>
@@ -445,6 +484,14 @@ export default function Scene({
           />
         </Suspense>
       )}
+      <PhotoWorld
+        cameras={cameras}
+        selectedId={selectedId}
+        onSelect={onSelect}
+        enabled={showPhotoWorld}
+        maxPlanes={photoWorldMax}
+      />
+      <PointCloud cloud={pointCloud} visible={showPointCloud} />
       <Cameras
         cameras={cameras}
         selectedId={selectedId}
@@ -453,7 +500,7 @@ export default function Scene({
         pairBaseline={pairBaseline ?? null}
         onSelect={onSelect}
         onHover={(c) => setHoveredId(c?.imageid ?? null)}
-        showRays={showRays}
+        showRays={raysOn}
         showFrustums={showFrustums}
       />
       <CameraController

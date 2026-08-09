@@ -5,20 +5,14 @@ import * as THREE from "three";
 const MODEL_URL = "/models/Perseverance.glb";
 
 export type RoverModelProps = {
-  /** World position of rover origin. */
   position?: [number, number, number];
   /**
    * Heading in degrees.
-   * - frame "body": keep 0 — cameras already share the GLB body frame.
-   * - frame "map": MMGIS yaw (0 ≈ north) in the EN path scene.
+   * - body: 0 (cameras share GLB frame)
+   * - map: MMGIS yaw, 0 ≈ north
    */
   yawDeg?: number | null;
-  /**
-   * "body" = stop-local cloud: native GLB meters/origin (matches camera RBF mapping).
-   * "map" = mission path: scaled + map yaw.
-   */
   frame?: "body" | "map";
-  /** Map-frame only: desired length in scene units. */
   targetLength?: number;
   scaleMul?: number;
   ground?: boolean;
@@ -26,11 +20,12 @@ export type RoverModelProps = {
 };
 
 /**
- * Official NASA/JPL-Caltech Perseverance glTF.
+ * NASA/JPL-Caltech Perseverance glTF.
  * https://science.nasa.gov/resource/mars-perseverance-rover-3d-model/
  *
- * Native GLB axes (approx): +X right, +Y up, +Z forward, origin near ground.
- * That matches stop-view camera mapping in coords.ts.
+ * Body frame: static mesh at native meters/origin (no mast/arm articulation,
+ * no re-center). Camera rays use true poses in coords.ts.
+ * Map frame: fit length + geographic yaw for the traverse view only.
  */
 export default function RoverModel({
   position = [0, 0, 0],
@@ -54,18 +49,12 @@ export default function RoverModel({
     });
 
     if (frame === "body") {
-      // Preserve authoring origin (aligns with body-frame camera positions).
-      // Only nudge so the lowest wheel sits on y=0 if slightly buried/floating.
-      if (ground) {
-        const box = new THREE.Box3().setFromObject(clone);
-        if (Number.isFinite(box.min.y) && Math.abs(box.min.y) < 0.5) {
-          clone.position.y -= box.min.y;
-        }
-      }
+      // Static 1:1 with authored GLB. Do not scale, re-center, ground-nudge,
+      // or animate mast/arm — images were taken at many articulations; the
+      // mesh is a single rest pose.
       return { clone, fitScale: 1 };
     }
 
-    // Map path: fit length and center for schematic visibility
     const box = new THREE.Box3().setFromObject(clone);
     const size = new THREE.Vector3();
     box.getSize(size);
@@ -93,18 +82,13 @@ export default function RoverModel({
   }, [clone]);
 
   const yawRad = ((yawDeg ?? 0) * Math.PI) / 180;
-  // Map path: 0 north, scene +Z south → π + yaw
-  // Body: identity — GLB already +Z forward like our camera mapping
   const rotY = frame === "body" ? 0 : Math.PI + yawRad;
+  const s = fitScale * scaleMul;
 
   if (!visible) return null;
 
   return (
-    <group
-      position={position}
-      rotation={[0, rotY, 0]}
-      scale={fitScale * scaleMul}
-    >
+    <group position={position} rotation={[0, rotY, 0]} scale={s}>
       <primitive object={clone} />
     </group>
   );

@@ -15,12 +15,11 @@ import numpy as np
 import pandas as pd
 
 from playground.pipeline.poses import (
-    approximate_fov,
+    camera_orientation,
     has_pose,
     normalize_vector,
     parse_tuple,
     stereo_partner_instrument,
-    yaw_from_quat,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,63 +51,99 @@ def build_images_frame(df: pd.DataFrame) -> pd.DataFrame:
     look_x = np.full(n, np.nan)
     look_y = np.full(n, np.nan)
     look_z = np.full(n, np.nan)
+    up_x = np.full(n, np.nan)
+    up_y = np.full(n, np.nan)
+    up_z = np.full(n, np.nan)
+    right_x = np.full(n, np.nan)
+    right_y = np.full(n, np.nan)
+    right_z = np.full(n, np.nan)
     yaw = np.full(n, np.nan)
+    pitch = np.full(n, np.nan)
+    roll = np.full(n, np.nan)
+    quat_w = np.full(n, np.nan)
+    quat_x = np.full(n, np.nan)
+    quat_y = np.full(n, np.nan)
+    quat_z = np.full(n, np.nan)
     has = np.zeros(n, dtype=bool)
     hfov = np.full(n, np.nan)
     vfov = np.full(n, np.nan)
     model_ok = np.zeros(n, dtype=bool)
+    basis_source = np.array([""] * n, dtype=object)
 
-    attitudes = df["attitude"] if "attitude" in df.columns else pd.Series([None] * n)
+    # Use plain object arrays (faster than Series.iloc in a tight loop)
+    attitudes = (
+        df["attitude"].to_numpy(dtype=object)
+        if "attitude" in df.columns
+        else np.full(n, None, dtype=object)
+    )
     positions = (
-        df["camera_camera_position"]
+        df["camera_camera_position"].to_numpy(dtype=object)
         if "camera_camera_position" in df.columns
-        else pd.Series([None] * n)
+        else np.full(n, None, dtype=object)
     )
     vectors = (
-        df["camera_camera_vector"]
+        df["camera_camera_vector"].to_numpy(dtype=object)
         if "camera_camera_vector" in df.columns
-        else pd.Series([None] * n)
+        else np.full(n, None, dtype=object)
     )
     instruments = (
-        df["camera_instrument"]
+        df["camera_instrument"].astype(str).to_numpy()
         if "camera_instrument" in df.columns
-        else pd.Series([""] * n)
+        else np.array([""] * n, dtype=object)
     )
     model_types = (
-        df["camera_camera_model_type"]
+        df["camera_camera_model_type"].astype(str).to_numpy()
         if "camera_camera_model_type" in df.columns
-        else pd.Series(["UNK"] * n)
+        else np.array(["UNK"] * n, dtype=object)
     )
     model_lists = (
-        df["camera_camera_model_component_list"]
+        df["camera_camera_model_component_list"].to_numpy(dtype=object)
         if "camera_camera_model_component_list" in df.columns
-        else pd.Series([None] * n)
+        else np.full(n, None, dtype=object)
+    )
+    dimensions = (
+        df["extended_dimension"].to_numpy(dtype=object)
+        if "extended_dimension" in df.columns
+        else np.full(n, None, dtype=object)
     )
 
     for i in range(n):
-        pos = parse_tuple(positions.iloc[i])
-        look = normalize_vector(parse_tuple(vectors.iloc[i]))
+        pos = parse_tuple(positions[i])
         if pos is not None and pos.size >= 3:
             pos_x[i], pos_y[i], pos_z[i] = pos[0], pos[1], pos[2]
+
+        ori = camera_orientation(
+            instrument=instruments[i],
+            camera_vector=vectors[i],
+            model_type=model_types[i],
+            model_component_list=model_lists[i],
+            dimension=dimensions[i],
+            attitude=attitudes[i],
+        )
+        look = ori.get("look")
+        up = ori.get("up")
+        right = ori.get("right")
         if look is not None:
             look_x[i], look_y[i], look_z[i] = look[0], look[1], look[2]
+        if up is not None:
+            up_x[i], up_y[i], up_z[i] = up[0], up[1], up[2]
+        if right is not None:
+            right_x[i], right_y[i], right_z[i] = right[0], right[1], right[2]
         has[i] = has_pose(
             pos if pos is not None and pos.size >= 3 else None,
-            look,
+            look if look is not None else None,
         )
-        q = parse_tuple(attitudes.iloc[i])
-        if q is not None and q.size == 4:
-            try:
-                yaw[i] = yaw_from_quat(q)
-            except Exception:
-                pass
-        h, v = approximate_fov(instruments.iloc[i])
-        hfov[i], vfov[i] = h, v
-        mt = model_types.iloc[i]
-        ml = model_lists.iloc[i]
-        # lightweight ok check without storing full vectors in parquet (keep raw cols)
-        if mt and str(mt).upper() not in ("UNK", "NAN", "") and ml:
-            model_ok[i] = True
+        hfov[i] = float(ori["hfov_deg"])
+        vfov[i] = float(ori["vfov_deg"])
+        model_ok[i] = bool(ori.get("model_ok"))
+        basis_source[i] = str(ori.get("basis_source") or "")
+        yaw[i] = ori["yaw_rad"]
+        pitch[i] = ori["pitch_rad"]
+        roll[i] = ori["roll_rad"]
+        quat_w[i] = ori["quat_w"]
+        quat_x[i] = ori["quat_x"]
+        quat_y[i] = ori["quat_y"]
+        quat_z[i] = ori["quat_z"]
 
     out = pd.DataFrame(
         {
@@ -130,11 +165,11 @@ def build_images_frame(df: pd.DataFrame) -> pd.DataFrame:
             "mast_el": _to_float(df["extended_mastEl"])
             if "extended_mastEl" in df.columns
             else np.nan,
-            "instrument": instruments.astype(str),
+            "instrument": instruments,
             "filter_name": df["camera_filter_name"].astype(str)
             if "camera_filter_name" in df.columns
             else "",
-            "model_type": model_types.astype(str),
+            "model_type": model_types,
             "model_ok": model_ok,
             "caption": df["caption"].astype(str) if "caption" in df.columns else "",
             "title": df["title"].astype(str) if "title" in df.columns else "",
@@ -161,17 +196,32 @@ def build_images_frame(df: pd.DataFrame) -> pd.DataFrame:
             "look_x": look_x,
             "look_y": look_y,
             "look_z": look_z,
+            "up_x": up_x,
+            "up_y": up_y,
+            "up_z": up_z,
+            "right_x": right_x,
+            "right_y": right_y,
+            "right_z": right_z,
             "yaw_rad": yaw,
+            "pitch_rad": pitch,
+            "roll_rad": roll,
+            "quat_w": quat_w,
+            "quat_x": quat_x,
+            "quat_y": quat_y,
+            "quat_z": quat_z,
             "has_pose": has,
             "hfov_deg": hfov,
             "vfov_deg": vfov,
+            "basis_source": basis_source,
             "dimension": df["extended_dimension"].astype(str)
             if "extended_dimension" in df.columns
             else "",
             "subframe": df["extended_subframeRect"].astype(str)
             if "extended_subframeRect" in df.columns
             else "",
-            "model_components": model_lists.astype(str),
+            "model_components": np.array(
+                ["" if x is None else str(x) for x in model_lists], dtype=object
+            ),
         }
     )
 

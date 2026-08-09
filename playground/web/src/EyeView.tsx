@@ -12,7 +12,13 @@ import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import type { Camera } from "./api";
 import { thumbUrl } from "./api";
-import { bodyDirToThree, bodyPosToThree } from "./coords";
+import {
+  bodyCamQuatToThreeAligned as bodyCamQuat,
+  bodyDirToThreeAligned as bodyDirToThree,
+  bodyPosToThreeAligned as bodyPosToThree,
+  bodyRightToThreeAligned as bodyRightToThree,
+  bodyUpToThreeAligned as bodyUpToThree,
+} from "./coords";
 
 const toThree = bodyPosToThree;
 const lookThree = bodyDirToThree;
@@ -32,10 +38,7 @@ function PhotoPlane({ cam, textureUrl }: { cam: Camera; textureUrl: string }) {
     const vfov = ((cam.vfov_deg ?? 34) * Math.PI) / 180;
     const width = 2 * dist * Math.tan(hfov / 2);
     const height = 2 * dist * Math.tan(vfov / 2);
-    const quat = new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(0, 0, 1),
-      look.clone().multiplyScalar(-1)
-    );
+    const quat = bodyCamQuat(cam);
     return { origin, look, width, height, dist, quat };
   }, [cam]);
 
@@ -62,10 +65,12 @@ function EyeCamera({
   const base = useMemo(() => {
     const origin = toThree(cam);
     const look = lookThree(cam);
-    let up = new THREE.Vector3(0, 1, 0);
-    let right = new THREE.Vector3().crossVectors(look, up);
+    let up = bodyUpToThree(cam);
+    let right = bodyRightToThree(cam);
+    // Ensure orthonormal
+    right = new THREE.Vector3().crossVectors(look, up);
     if (right.lengthSq() < 1e-8) {
-      right = new THREE.Vector3().crossVectors(look, new THREE.Vector3(1, 0, 0));
+      right = new THREE.Vector3().crossVectors(look, new THREE.Vector3(0, 1, 0));
     }
     right.normalize();
     up = new THREE.Vector3().crossVectors(right, look).normalize();

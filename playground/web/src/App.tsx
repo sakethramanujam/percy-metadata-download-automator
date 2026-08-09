@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
 import MissionPath from "./MissionPath";
 import EyeView from "./EyeView";
+import PanoView from "./PanoView";
+import MapInset from "./MapInset";
 import {
   Camera,
   MapWaypoint,
@@ -11,11 +13,17 @@ import {
   fetchHealth,
   fetchImage,
   fetchMap,
+  fetchPanoMeta,
   fetchStats,
+  fetchStereoDepth,
   fetchStereoPairs,
   fetchStops,
+  panoUrl,
   thumbUrl,
+  type PanoSourceSize,
+  type StereoPointCloud,
 } from "./api";
+import { bodyTupleToThreeAligned } from "./coords";
 
 type ViewMode = "path" | "stop";
 
@@ -44,6 +52,8 @@ export default function App() {
   });
   const [showRays, setShowRays] = useState(true);
   const [showFrustums, setShowFrustums] = useState(false);
+  /** FOV-matched image planes at camera poses for this stop */
+  const [showPhotoWorld, setShowPhotoWorld] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flyToken, setFlyToken] = useState(0);
@@ -61,11 +71,30 @@ export default function App() {
 
   // First-person rover eye view
   const [eyeMode, setEyeMode] = useState(false);
+  // Pose-stitched site panorama
+  const [panoMode, setPanoMode] = useState(false);
+  const [panoLoading, setPanoLoading] = useState(false);
+  const [panoMeta, setPanoMeta] = useState<string | null>(null);
+  const [panoError, setPanoError] = useState<string | null>(null);
+  const [panoSrc, setPanoSrc] = useState<string | null>(null);
+  const [panoSize, setPanoSize] = useState<PanoSourceSize>("medium");
 
   // NASA MMGIS map localization
   const [waypoints, setWaypoints] = useState<MapWaypoint[]>([]);
   const [mapAvailable, setMapAvailable] = useState(false);
   const [mapStats, setMapStats] = useState("");
+  const [posedOnlyStops, setPosedOnlyStops] = useState(true);
+  // CTX covers full Jezero traverse; HiRISE is higher-res but only near landing
+  const [basemapLayer, setBasemapLayer] = useState<"ctx" | "hirise" | "hrsc" | "base">(
+    "ctx"
+  );
+  const [showBasemap, setShowBasemap] = useState(true);
+  const [depthPreview, setDepthPreview] = useState<string | null>(null);
+  const [depthMeta, setDepthMeta] = useState<string | null>(null);
+  const [depthLoading, setDepthLoading] = useState(false);
+  const [pointCloud, setPointCloud] = useState<StereoPointCloud | null>(null);
+  const [showPointCloud, setShowPointCloud] = useState(true);
+  const bootstrapped = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -75,7 +104,15 @@ export default function App() {
           setHealth(h.hint || "Index not built");
           return;
         }
-        setHealth(`Index ready · ${h.n_images?.toLocaleString() ?? "?"} images`);
+        const gpu = (h as { gpu?: { cuda?: boolean; name?: string; vram_mb?: number } })
+          .gpu;
+        const gpuTxt =
+          gpu?.cuda && gpu.name
+            ? ` · GPU ${gpu.name}${gpu.vram_mb ? ` ${gpu.vram_mb}MB` : ""}`
+            : "";
+        setHealth(
+          `Index ready · ${h.n_images?.toLocaleString() ?? "?"} images${gpuTxt}`
+        );
         const [s, st] = await Promise.all([fetchStops(), fetchStats()]);
         // Chronological path order
         const ordered = [...s.stops].sort((a, b) => {
@@ -88,10 +125,36 @@ export default function App() {
         setStats(
           `${st.n_stops} stops · ${st.n_posed.toLocaleString()} posed / ${st.n_images.toLocaleString()} images · sols ${st.sol_min ?? "?"}–${st.sol_max ?? "?"}`
         );
-        // Start on mission path; densest stop is pre-selected but path view is default
-        const best = [...ordered].sort((a, b) => b.n_posed - a.n_posed)[0];
-        if (best) setSelectedStop(best);
-        setViewMode("path");
+
+        // Deep link: ?view=path|stop&site=&drive=&image=
+        const params = new URLSearchParams(window.location.search);
+        const viewParam = params.get("view");
+        const siteParam = params.get("site");
+        const driveParam = params.get("drive");
+        const imageParam = params.get("image");
+        let resolved: Stop | null = null;
+        if (siteParam != null && driveParam != null) {
+          const site = Number(siteParam);
+          const drive = Number(driveParam);
+          resolved =
+            ordered.find((x) => x.site === site && x.drive === drive) ?? null;
+        }
+        if (!resolved) {
+          resolved =
+            [...ordered].sort((a, b) => b.n_posed - a.n_posed)[0] ?? null;
+        }
+        if (resolved) setSelectedStop(resolved);
+        if (viewParam === "stop" && resolved) {
+          setViewMode("stop");
+        } else {
+          setViewMode("path");
+        }
+        if (imageParam && resolved) {
+          // Cameras load when stop view opens; stash imageid for later select
+          (window as unknown as { __percyPendingImage?: string }).__percyPendingImage =
+            imageParam;
+        }
+        bootstrapped.current = true;
 
         try {
           const m = await fetchMap();
@@ -117,6 +180,21 @@ export default function App() {
     })();
   }, []);
 
+  // Keep URL in sync for shareable deep links
+  useEffect(() => {
+    if (!bootstrapped.current) return;
+    const params = new URLSearchParams();
+    params.set("view", viewMode);
+    if (selectedStop?.site != null) params.set("site", String(selectedStop.site));
+    if (selectedStop?.drive != null) params.set("drive", String(selectedStop.drive));
+    if (selected?.imageid) params.set("image", selected.imageid);
+    const qs = params.toString();
+    const next = `${window.location.pathname}?${qs}`;
+    if (next !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(null, "", next);
+    }
+  }, [viewMode, selectedStop, selected]);
+
   useEffect(() => {
     if (viewMode !== "stop") return;
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) return;
@@ -128,6 +206,9 @@ export default function App() {
     setPlaying(false);
     setSelectedPair(null);
     setPairs([]);
+    setPointCloud(null);
+    setDepthPreview(null);
+    setDepthMeta(null);
     setEyeMode(false);
     fetchCameras(selectedStop.site, selectedStop.drive)
       .then((r) => {
@@ -139,6 +220,19 @@ export default function App() {
           setSolCursor(Math.max(...sols));
         } else {
           setSolCursor(selectedStop.sol_max ?? null);
+        }
+        // Deep-link image select
+        const pending = (window as unknown as { __percyPendingImage?: string })
+          .__percyPendingImage;
+        if (pending) {
+          const hit = r.cameras.find((c) => c.imageid === pending);
+          if (hit) {
+            setSelected(hit);
+            setFlyTo(hit);
+            setFlyToken((t) => t + 1);
+          }
+          delete (window as unknown as { __percyPendingImage?: string })
+            .__percyPendingImage;
         }
       })
       .catch((e) => setError(String(e)))
@@ -188,18 +282,26 @@ export default function App() {
 
   const filteredStops = useMemo(() => {
     const q = filter.trim().toLowerCase();
+    const tokens = q.split(/[\s,;/]+/).filter(Boolean);
     return stops
       .filter((s) => {
-        if (!q) return true;
-        return (
-          String(s.stop_id).includes(q) ||
-          String(s.site).includes(q) ||
-          String(s.sol_min).includes(q) ||
-          String(s.sol_max).includes(q)
-        );
+        if (posedOnlyStops && (s.n_posed ?? 0) <= 0) return false;
+        if (!tokens.length) return true;
+        const hay = [
+          s.stop_id,
+          s.site,
+          s.drive,
+          s.sol_min,
+          s.sol_max,
+          s.rmc,
+        ]
+          .map((x) => String(x ?? "").toLowerCase())
+          .join(" ");
+        // All tokens must match; "9 0" or "site 9 drive 0" work
+        return tokens.every((t) => hay.includes(t));
       })
       .slice(0, 500);
-  }, [stops, filter]);
+  }, [stops, filter, posedOnlyStops]);
 
   const visibleCameras = useMemo(() => {
     return cameras.filter((c) => {
@@ -239,12 +341,16 @@ export default function App() {
 
   const pairBaseline = useMemo(() => {
     if (!selectedPair?.left_pos || !selectedPair?.right_pos) return null;
-    // Body (x fwd, y right, z down) → Three/GLB (y, -z, x)
-    const [lx, ly, lz] = selectedPair.left_pos;
-    const [rx, ry, rz] = selectedPair.right_pos;
+    // Same body→GLB mapping / mast hardpoints as Scene rays
     return [
-      [ly, -lz, lx] as [number, number, number],
-      [ry, -rz, rx] as [number, number, number],
+      bodyTupleToThreeAligned(
+        selectedPair.left_pos,
+        selectedPair.left_instrument
+      ),
+      bodyTupleToThreeAligned(
+        selectedPair.right_pos,
+        selectedPair.right_instrument
+      ),
     ] as [[number, number, number], [number, number, number]];
   }, [selectedPair]);
 
@@ -299,6 +405,9 @@ export default function App() {
 
   function onSelectPair(p: StereoPair) {
     setSelectedPair(p);
+    setPointCloud(null);
+    setDepthPreview(null);
+    setDepthMeta(null);
     const left = cameras.find((c) => c.imageid === p.left_imageid);
     const right = cameras.find((c) => c.imageid === p.right_imageid);
     const cam = left || right;
@@ -325,13 +434,22 @@ export default function App() {
   }
 
   function flyToSelected() {
-    if (!selected) return;
+    // Animate the stop-view orbit camera behind the selected camera pose
+    // and aim along its look vector (see Scene CameraController).
+    if (!selected || selected.pos_x == null) return;
+    setEyeMode(false);
+    setPanoMode(false);
     setFlyTo(selected);
     setFlyToken((t) => t + 1);
   }
 
   function selectStop(s: Stop, enterStop = true) {
     setSelectedStop(s);
+    setDepthPreview(null);
+    setDepthMeta(null);
+    setPanoMode(false);
+    setPanoSrc(null);
+    setPanoError(null);
     if (enterStop) setViewMode("stop");
   }
 
@@ -339,6 +457,85 @@ export default function App() {
     setViewMode("path");
     setPlaying(false);
     setEyeMode(false);
+    setPanoMode(false);
+  }
+
+  async function openSitePano(size: PanoSourceSize = panoSize) {
+    if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
+      return;
+    }
+    setPanoLoading(true);
+    setPanoError(null);
+    setPanoMeta(null);
+    try {
+      const site = selectedStop.site;
+      const drive = selectedStop.drive;
+      // Higher source tiers → wider output for detail
+      const outW =
+        size === "full" ? 8192 : size === "large" ? 6144 : size === "medium" ? 4096 : 3072;
+      const maxFrames = size === "full" || size === "large" ? 32 : 40;
+      const meta = await fetchPanoMeta(site, drive, {
+        max_frames: maxFrames,
+        out_width: outW,
+        size,
+      });
+      setPanoMeta(
+        `${meta.n_frames} frames · ${size}` +
+          (meta.source_max_side ? `≤${meta.source_max_side}px` : "") +
+          ` · az ${meta.az_span_deg.toFixed(0)}° · ${meta.elapsed_ms.toFixed(0)} ms`
+      );
+      setPanoSrc(
+        panoUrl(site, drive, { max_frames: maxFrames, out_width: outW, size }) +
+          `&t=${meta.n_frames}-${size}`
+      );
+      setPanoMode(true);
+      setEyeMode(false);
+    } catch (e) {
+      setPanoError(String(e));
+    } finally {
+      setPanoLoading(false);
+    }
+  }
+
+  async function runStereoDepth() {
+    if (!selectedPair || selectedStop?.site == null || selectedStop?.drive == null) {
+      return;
+    }
+    setDepthLoading(true);
+    setDepthPreview(null);
+    setDepthMeta(null);
+    setPointCloud(null);
+    try {
+      const r = await fetchStereoDepth(
+        selectedStop.site,
+        selectedStop.drive,
+        selectedPair.id,
+        { pointCloud: true, maxPoints: 20000, size: "small" }
+      );
+      setDepthPreview(r.preview_data_url);
+      const st = r.stats || {};
+      const cloud = r.point_cloud ?? null;
+      setPointCloud(cloud);
+      setShowPointCloud(true);
+      const nPts = cloud?.n ?? 0;
+      const frame = cloud?.frame ?? "?";
+      setDepthMeta(
+        `disparity valid ${(100 * (st.valid_frac ?? 0)).toFixed(0)}% · ` +
+          `median ${st.disp_median != null ? Number(st.disp_median).toFixed(1) : "?"} px` +
+          (r.approx_depth_m_median != null
+            ? ` · ~${Number(r.approx_depth_m_median).toFixed(1)} m (rough)`
+            : "") +
+          (nPts > 0 ? ` · cloud ${nPts.toLocaleString()} pts (${frame})` : " · no cloud") +
+          (r.backend ? ` · ${r.backend}` : "") +
+          (r.device ? ` @ ${r.device}` : "") +
+          (r.elapsed_ms != null ? ` · ${Number(r.elapsed_ms).toFixed(0)} ms` : "")
+      );
+    } catch (e) {
+      setDepthMeta(String(e));
+      setPointCloud(null);
+    } finally {
+      setDepthLoading(false);
+    }
   }
 
   const pathStops = useMemo(() => stops.slice(0, 200), [stops]);
@@ -369,10 +566,18 @@ export default function App() {
             </button>
           </div>
           <input
-            placeholder="Filter stops (site, sol, id)"
+            placeholder="Search stops: site drive sol  ·  e.g. 9 0"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
+          <label className="inline-check">
+            <input
+              type="checkbox"
+              checked={posedOnlyStops}
+              onChange={(e) => setPosedOnlyStops(e.target.checked)}
+            />
+            Posed only
+          </label>
           {viewMode === "stop" && (
             <>
               <div className="layers">
@@ -391,6 +596,14 @@ export default function App() {
                 <label>
                   <input
                     type="checkbox"
+                    checked={showPhotoWorld}
+                    onChange={(e) => setShowPhotoWorld(e.target.checked)}
+                  />
+                  Photo world
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
                     checked={showRays}
                     onChange={(e) => setShowRays(e.target.checked)}
                   />
@@ -403,6 +616,16 @@ export default function App() {
                     onChange={(e) => setShowFrustums(e.target.checked)}
                   />
                   Frustums
+                </label>
+                <label title="Stereo body-frame cloud from depth on selected pair">
+                  <input
+                    type="checkbox"
+                    checked={showPointCloud}
+                    disabled={!pointCloud}
+                    onChange={(e) => setShowPointCloud(e.target.checked)}
+                  />
+                  Point cloud
+                  {pointCloud ? ` (${pointCloud.n.toLocaleString()})` : ""}
                 </label>
               </div>
 
@@ -471,9 +694,51 @@ export default function App() {
           )}
           {viewMode === "path" && (
             <div className="empty" style={{ padding: "8px 0" }}>
-              Each node is a <strong>(site, drive)</strong> stop ordered by sol.
-              Node size ∝ posed images; lateral offset by site.{" "}
-              <strong>Not</strong> real Jezero map coordinates.
+              {mapAvailable ? (
+                <>
+                  Real Jezero traverse (MMGIS) with{" "}
+                  <a
+                    href="https://maps.planet.fu-berlin.de/jezero/"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    FU Berlin
+                  </a>{" "}
+                  orbital basemap. Click = place rover; <strong>double-click</strong>{" "}
+                  = cameras.
+                  <div className="basemap-controls">
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={showBasemap}
+                        onChange={(e) => setShowBasemap(e.target.checked)}
+                      />
+                      Orbital basemap
+                    </label>
+                    <select
+                      value={basemapLayer}
+                      disabled={!showBasemap}
+                      onChange={(e) =>
+                        setBasemapLayer(
+                          e.target.value as "ctx" | "hirise" | "hrsc" | "base"
+                        )
+                      }
+                      title="FU Berlin WMS layer — CTX covers full route; HiRISE is partial"
+                    >
+                      <option value="ctx">CTX (full route)</option>
+                      <option value="hrsc">HRSC (wide region)</option>
+                      <option value="hirise">HiRISE (landing only)</option>
+                      <option value="base">Base HSV</option>
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <>
+                  Schematic path (map missing — run{" "}
+                  <code>python -m playground.pipeline.fetch_mmgis</code>). Each
+                  node is a <strong>(site, drive)</strong> stop ordered by sol.
+                </>
+              )}
             </div>
           )}
         </div>
@@ -524,6 +789,36 @@ export default function App() {
                   Export pairs JSON
                 </button>
               )}
+              {selectedPair && (
+                <button
+                  type="button"
+                  className="export-btn"
+                  disabled={depthLoading}
+                  onClick={runStereoDepth}
+                >
+                  {depthLoading
+                    ? "Computing depth + cloud…"
+                    : "Stereo depth + 3D cloud"}
+                </button>
+              )}
+              {pointCloud && (
+                <button
+                  type="button"
+                  className="export-btn"
+                  onClick={() => setShowPointCloud((v) => !v)}
+                >
+                  {showPointCloud ? "Hide point cloud" : "Show point cloud"} (
+                  {pointCloud.n.toLocaleString()} pts)
+                </button>
+              )}
+              {depthMeta && <div className="muted depth-meta">{depthMeta}</div>}
+              {depthPreview && (
+                <img
+                  className="depth-preview"
+                  src={depthPreview}
+                  alt="Disparity preview"
+                />
+              )}
             </div>
           </>
         )}
@@ -569,7 +864,21 @@ export default function App() {
             waypoints={waypoints}
             mapAvailable={mapAvailable}
             selectedStopId={selectedStop?.stop_id ?? null}
-            onSelectStop={(s) => selectStop(s, true)}
+            onSelectStop={(s) => selectStop(s, false)}
+            onOpenStop={(s) => selectStop(s, true)}
+            showBasemap={showBasemap}
+            basemapLayer={basemapLayer}
+          />
+        ) : panoMode && panoSrc ? (
+          <PanoView
+            imageUrl={panoSrc}
+            title={
+              selectedStop
+                ? `Pano · site ${selectedStop.site} / drive ${selectedStop.drive}`
+                : "Site panorama"
+            }
+            meta={panoMeta ?? undefined}
+            onClose={() => setPanoMode(false)}
           />
         ) : eyeMode && selected && selected.pos_x != null ? (
           <EyeView
@@ -594,6 +903,7 @@ export default function App() {
               onSelect={(c) => onSelectCamera(c, true)}
               showRays={showRays}
               showFrustums={showFrustums}
+              showPhotoWorld={showPhotoWorld}
               flyTo={flyTo}
               flyToken={flyToken}
               frameToken={frameToken}
@@ -601,13 +911,27 @@ export default function App() {
               pairBaseline={pairBaseline}
               roverYawDeg={selectedStop?.yaw_deg ?? null}
               showRover
+              pointCloud={pointCloud}
+              showPointCloud={showPointCloud}
             />
+            {/* Basemap lives in geographic EN; stop 3D is rover body frame — keep map as inset */}
+            {mapAvailable && waypoints.length > 0 && showBasemap && (
+              <MapInset
+                waypoints={waypoints}
+                selectedStop={selectedStop}
+                basemapLayer={basemapLayer}
+                onOpenPath={openMissionPath}
+              />
+            )}
             <div className="hud">
               {selectedStop
-                ? `Stop ${selectedStop.stop_id} · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
+                ? `Stop ${selectedStop.stop_id} · body frame · sol ≤ ${solCursor ?? "?"} · ${visibleCameras.length} cams · ${visiblePairs.length} pairs`
                 : "Select a stop"}
               <div className="muted">
-                Click a camera · then{" "}
+                {showPhotoWorld
+                  ? "Photo world: image planes at true poses · "
+                  : ""}
+                Map stays in the corner (body ≠ map coords) ·{" "}
                 <button
                   type="button"
                   className="linkish"
@@ -617,9 +941,40 @@ export default function App() {
                   Rover eye view
                 </button>
                 {" · "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={
+                    panoLoading ||
+                    !selectedStop ||
+                    selectedStop.site == null ||
+                    selectedStop.drive == null
+                  }
+                  onClick={() => openSitePano(panoSize)}
+                >
+                  {panoLoading ? "Stitching pano…" : "Site panorama"}
+                </button>
+                <select
+                  className="pano-size-select"
+                  value={panoSize}
+                  disabled={panoLoading}
+                  title="NASA product size for pano sources"
+                  onChange={(e) => setPanoSize(e.target.value as PanoSourceSize)}
+                >
+                  <option value="small">small (fast)</option>
+                  <option value="medium">medium</option>
+                  <option value="large">large</option>
+                  <option value="full">full (slow / heavy)</option>
+                </select>
+                {" · "}
                 <button type="button" className="linkish" onClick={openMissionPath}>
                   ← Mission path
                 </button>
+                {panoError && (
+                  <div className="depth-meta" style={{ color: "#f0a0a0" }}>
+                    {panoError}
+                  </div>
+                )}
               </div>
             </div>
           </>
@@ -709,7 +1064,12 @@ export default function App() {
                 >
                   Rover eye view
                 </button>
-                <button type="button" onClick={flyToSelected}>
+                <button
+                  type="button"
+                  onClick={flyToSelected}
+                  disabled={selected.pos_x == null}
+                  title="Orbit camera to this rover camera's pose and look direction"
+                >
                   Fly to camera
                 </button>
               </div>
@@ -729,13 +1089,31 @@ export default function App() {
                 </dd>
                 <dt>FOV</dt>
                 <dd>
-                  {selected.hfov_deg?.toFixed?.(0) ?? selected.hfov_deg}° ×{" "}
-                  {selected.vfov_deg?.toFixed?.(0) ?? selected.vfov_deg}°
+                  {selected.hfov_deg?.toFixed?.(1) ?? selected.hfov_deg}° ×{" "}
+                  {selected.vfov_deg?.toFixed?.(1) ?? selected.vfov_deg}°
+                  {selected.basis_source
+                    ? ` · ${selected.basis_source}`
+                    : ""}
                 </dd>
                 <dt>position</dt>
                 <dd>
                   ({selected.pos_x?.toFixed(3)}, {selected.pos_y?.toFixed(3)},{" "}
                   {selected.pos_z?.toFixed(3)})
+                </dd>
+                <dt>look</dt>
+                <dd>
+                  ({fmt3(selected.look_x)}, {fmt3(selected.look_y)},{" "}
+                  {fmt3(selected.look_z)})
+                </dd>
+                <dt>up</dt>
+                <dd>
+                  ({fmt3(selected.up_x)}, {fmt3(selected.up_y)},{" "}
+                  {fmt3(selected.up_z)})
+                </dd>
+                <dt>attitude</dt>
+                <dd>
+                  yaw {fmtDeg(selected.yaw_rad)} · pitch{" "}
+                  {fmtDeg(selected.pitch_rad)} · roll {fmtDeg(selected.roll_rad)}
                 </dd>
                 <dt>mast</dt>
                 <dd>
@@ -769,4 +1147,14 @@ export default function App() {
 function fmt(v: number | null | undefined) {
   if (v == null || Number.isNaN(Number(v))) return "?";
   return Number(v).toFixed(1);
+}
+
+function fmt3(v: number | null | undefined) {
+  if (v == null || Number.isNaN(Number(v))) return "?";
+  return Number(v).toFixed(3);
+}
+
+function fmtDeg(rad: number | null | undefined) {
+  if (rad == null || Number.isNaN(Number(rad))) return "?";
+  return `${((Number(rad) * 180) / Math.PI).toFixed(1)}°`;
 }

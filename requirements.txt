@@ -13,3 +13,11 @@ fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
 httpx>=0.27,<1
 pytest>=8.0,<9
+
+# Optional stereo depth (playground)
+opencv-python-headless>=4.8,<5
+Pillow>=10,<12
+
+# GPU stereo (optional — install CUDA wheel when a NVIDIA GPU is present)
+# pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1,<3

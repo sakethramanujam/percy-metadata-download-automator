@@ -43,8 +43,8 @@ DEFAULT_METADATA_NAME = "full-metadata.csv"
 DEFAULT_STATE_NAME = "state.json"
 DEFAULT_KAGGLE_DIR = REPO_ROOT / "kaggle_dataset"
 DEFAULT_DATASET = "sakethramanujam/mars2020imagecatalogue"
-REQUEST_TIMEOUT = 90
-MAX_RETRIES = 5
+REQUEST_TIMEOUT = 120
+MAX_RETRIES = 6
 CHECKPOINT_EVERY_PAGES = 200
 
 
@@ -129,12 +129,23 @@ def get_image_list(
     return []
 
 
-def _fetch_page_frame(page: int, num: int = PAGE_SIZE) -> tuple[int, pd.DataFrame]:
-    """Worker helper: own session per task (requests.Session is not fully thread-safe)."""
-    images = get_image_list(page, session=_session(), num=num)
-    if not images:
-        return page, pd.DataFrame()
-    return page, pd.json_normalize(images, sep="_")
+def _fetch_page_frame(
+    page: int, num: int = PAGE_SIZE, *, soft: bool = True
+) -> tuple[int, pd.DataFrame, Optional[str]]:
+    """Worker helper: own session per task (requests.Session is not fully thread-safe).
+
+    When soft=True (default), failures return an empty frame + error string instead of
+    raising — one bad page must not kill a multi-hour catch-up.
+    """
+    try:
+        images = get_image_list(page, session=_session(), num=num)
+        if not images:
+            return page, pd.DataFrame(), None
+        return page, pd.json_normalize(images, sep="_"), None
+    except Exception as e:
+        if soft:
+            return page, pd.DataFrame(), str(e)
+        raise
 
 
 def download_pages(
@@ -146,11 +157,14 @@ def download_pages(
     page_size: int = PAGE_SIZE,
     on_batch: Optional[Callable[[pd.DataFrame, int], None]] = None,
     batch_size: int = CHECKPOINT_EVERY_PAGES,
+    soft_fail: bool = True,
 ) -> pd.DataFrame:
     """Download `n_pages` pages starting at `start_page` (newest-first order).
 
     Uses a thread pool for bulk catch-ups. Optional `on_batch(df_so_far, pages_done)`
     is called every `batch_size` completed pages for checkpointing.
+
+    soft_fail=True (default): log and skip pages that keep failing after retries.
     """
     del session  # each worker builds its own session
     if n_pages <= 0:
@@ -159,22 +173,40 @@ def download_pages(
     pages = list(range(start_page, start_page + n_pages))
     frames_by_page: dict[int, pd.DataFrame] = {}
     workers = max(1, int(workers))
+    failed_pages: list[tuple[int, str]] = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_fetch_page_frame, page, page_size): page for page in pages
+            pool.submit(_fetch_page_frame, page, page_size, soft=soft_fail): page
+            for page in pages
         }
         done = 0
         with tqdm(total=len(pages), desc="Downloading metadata pages") as bar:
             for fut in as_completed(futures):
-                page, frame = fut.result()
-                if not frame.empty:
+                try:
+                    page, frame, err = fut.result()
+                except Exception as e:
+                    page = futures[fut]
+                    err = str(e)
+                    frame = pd.DataFrame()
+                if err:
+                    failed_pages.append((page, err))
+                    bar.set_postfix_str(f"skip p{page}", refresh=False)
+                elif not frame.empty:
                     frames_by_page[page] = frame
                 done += 1
                 bar.update(1)
                 if on_batch and done % batch_size == 0:
                     partial = _frames_to_df(frames_by_page)
                     on_batch(partial, done)
+
+    if failed_pages:
+        print(
+            f"Warning: skipped {len(failed_pages)} page(s) after retries "
+            f"(first: page {failed_pages[0][0]}: {failed_pages[0][1][:120]})"
+        )
+        # Persist failed page list next to data dir when possible via caller state
+        download_pages.last_failed_pages = failed_pages  # type: ignore[attr-defined]
 
     return _frames_to_df(frames_by_page)
 
@@ -411,7 +443,21 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     # Newest-first pages: pull enough pages to cover new images, plus a small
     # buffer for page-boundary drift, then dedupe on imageid.
-    uncapped_pages = pages_for_images(new_count) + int(args.page_buffer)
+    # Optional --start-page resumes mid-archive (skip already-fetched newest pages).
+    start_page = int(getattr(args, "start_page", 0) or 0)
+    if start_page < 0:
+        start_page = 0
+
+    total_pages = pages_for_images(remote_total)
+    if start_page > 0:
+        # Continue deeper into older sols rather than re-fetching newest pages.
+        uncapped_pages = max(total_pages - start_page, 0) + int(args.page_buffer)
+        print(
+            f"Resuming from page {start_page} "
+            f"(NASA ~{total_pages} pages total, remaining ~{uncapped_pages})"
+        )
+    else:
+        uncapped_pages = pages_for_images(new_count) + int(args.page_buffer)
     if args.force_refresh_pages:
         uncapped_pages = max(uncapped_pages, args.force_refresh_pages)
     pages_needed = uncapped_pages
@@ -422,32 +468,36 @@ def cmd_update(args: argparse.Namespace) -> int:
     workers = getattr(args, "workers", DEFAULT_WORKERS)
     est_min = max(pages_needed / max(workers, 1) * 0.5, 1)
     print(
-        f"Downloading {pages_needed} newest page(s) "
+        f"Downloading {pages_needed} page(s) from start_page={start_page} "
         f"(page_size={PAGE_SIZE}, workers={workers}, ~{est_min:.0f}+ min)..."
     )
 
     checkpoint_path = Path(args.data_dir) / "patch-checkpoint.csv"
 
-    def _checkpoint(partial: pd.DataFrame, pages_done: int) -> None:
+    def _checkpoint(partial_df: pd.DataFrame, pages_done: int) -> None:
         # Save patch only (cheap). Final merge into full-metadata happens at end.
-        save_metadata(partial, checkpoint_path)
+        save_metadata(partial_df, checkpoint_path)
+        absolute_done = start_page + pages_done
         mid_state = {
             **state,
             "last_updated": now_iso(),
             "last_partial": True,
             "complete": False,
-            "catchup_pages_done": pages_done,
-            "catchup_pages_total": pages_needed,
-            "patch_checkpoint_rows": len(partial),
+            "catchup_pages_done": absolute_done,
+            "catchup_pages_total": start_page + pages_needed,
+            "catchup_start_page": start_page,
+            "patch_checkpoint_rows": len(partial_df),
         }
         save_state(state_path, mid_state)
         print(
-            f"\nCheckpoint: {pages_done}/{pages_needed} pages, "
-            f"{len(partial)} patch rows -> {checkpoint_path.name}"
+            f"\nCheckpoint: {pages_done}/{pages_needed} pages this run "
+            f"(absolute page ~{absolute_done}), "
+            f"{len(partial_df)} patch rows -> {checkpoint_path.name}"
         )
 
     patch = download_pages(
         pages_needed,
+        start_page=start_page,
         workers=workers,
         on_batch=_checkpoint if pages_needed >= CHECKPOINT_EVERY_PAGES else None,
     )
@@ -459,14 +509,15 @@ def cmd_update(args: argparse.Namespace) -> int:
         checkpoint_path.unlink(missing_ok=True)
 
     added = len(merged) - len(existing)
-    # Only mark fully synced when the run was not page-capped. On a partial
-    # catch-up, keep total_images at the local unique row count so the next
-    # update still sees the remaining NASA deficit.
-    if partial:
+    # Only mark fully synced when the run was not page-capped and we covered
+    # through the end of the NASA catalogue from start_page 0 (or a full resume).
+    reached_end = (start_page + pages_needed) >= total_pages and not partial
+    if not reached_end:
         synced_total = len(merged)
         print(
             f"Partial update: local has {synced_total} unique rows; "
-            f"NASA has {remote_total}. Re-run update to continue catch-up."
+            f"NASA has {remote_total}. Re-run update "
+            f"(e.g. --start-page {start_page + pages_needed}) to continue catch-up."
         )
     else:
         synced_total = remote_total
@@ -474,19 +525,75 @@ def cmd_update(args: argparse.Namespace) -> int:
     state.update(
         {
             "last_updated": now_iso(),
-            "total_images": synced_total,
+            "total_images": synced_total if reached_end else len(merged),
             "n_rows": len(merged),
             "metadata_file": meta_path.name,
             "last_patch_rows": len(patch),
             "last_rows_added": max(added, 0),
-            "last_partial": partial,
-            "complete": (not partial) and len(merged) > 0,
-            "catchup_pages_done": pages_needed,
-            "catchup_pages_total": pages_needed,
+            "last_partial": not reached_end,
+            "complete": reached_end and len(merged) > 0,
+            "catchup_pages_done": start_page + pages_needed,
+            "catchup_pages_total": total_pages,
+            "catchup_start_page": start_page,
         }
     )
     save_state(state_path, state)
     print(f"Updated {meta_path}: {len(existing)} -> {len(merged)} rows (+{max(added, 0)})")
+    failed = getattr(download_pages, "last_failed_pages", None)
+    if failed:
+        state["last_failed_pages"] = len(failed)
+        save_state(state_path, state)
+    return 0
+
+
+def cmd_merge_checkpoint(args: argparse.Namespace) -> int:
+    """Merge data/patch-checkpoint.csv into full-metadata.csv without downloading."""
+    meta_path, state_path = data_paths(args.data_dir)
+    checkpoint_path = Path(args.data_dir) / "patch-checkpoint.csv"
+    if not checkpoint_path.is_file():
+        print(f"No checkpoint at {checkpoint_path}")
+        return 1
+    if not meta_path.is_file():
+        print(f"No full metadata at {meta_path}")
+        return 1
+
+    print(f"Loading {meta_path}…")
+    existing = load_metadata(meta_path)
+    print(f"  full unique={existing['imageid'].nunique() if 'imageid' in existing.columns else len(existing)}")
+    print(f"Loading {checkpoint_path}…")
+    patch = load_metadata(checkpoint_path)
+    print(f"  patch unique={patch['imageid'].nunique() if 'imageid' in patch.columns else len(patch)}")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = Path(args.data_dir) / f"full-metadata.pre-merge-{stamp}.csv"
+    shutil.copy2(meta_path, backup)
+    print(f"Backup -> {backup.name}")
+
+    merged = merge_metadata(existing, patch)
+    save_metadata(merged, meta_path)
+    added = len(merged) - len(existing)
+    print(f"Merged: {len(existing)} -> {len(merged)} (+{max(added, 0)})")
+
+    if args.remove_checkpoint:
+        checkpoint_path.unlink(missing_ok=True)
+        print("Removed patch-checkpoint.csv")
+
+    state = load_state(state_path)
+    state.update(
+        {
+            "last_updated": now_iso(),
+            "total_images": len(merged),
+            "n_rows": len(merged),
+            "metadata_file": meta_path.name,
+            "complete": False,
+            "last_partial": True,
+            "patch_rows_merged": len(patch),
+            "unique_after_merge": len(merged),
+            "merged_from_checkpoint_at": now_iso(),
+        }
+    )
+    save_state(state_path, state)
+    print(f"State -> {state_path}")
     return 0
 
 
@@ -591,6 +698,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="Show local + NASA sync status")
     sp.set_defaults(func=cmd_status)
 
+    mp = sub.add_parser(
+        "merge-checkpoint",
+        help="Merge patch-checkpoint.csv into full-metadata.csv",
+    )
+    mp.add_argument(
+        "--remove-checkpoint",
+        action="store_true",
+        help="Delete patch-checkpoint.csv after a successful merge",
+    )
+    mp.set_defaults(func=cmd_merge_checkpoint)
+
     ip = sub.add_parser("init", help="Bootstrap local metadata")
     src = ip.add_mutually_exclusive_group(required=True)
     src.add_argument(
@@ -658,6 +776,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WORKERS,
         help=f"Parallel page downloads (default: {DEFAULT_WORKERS})",
     )
+    up.add_argument(
+        "--start-page",
+        type=int,
+        default=0,
+        help=(
+            "Resume catch-up from this newest-first page index "
+            "(skip already-fetched newer pages; default: 0)"
+        ),
+    )
     up.set_defaults(func=cmd_update)
 
     pp = sub.add_parser("publish", help="Push local full-metadata.csv to Kaggle")
@@ -678,6 +805,12 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--max-pages", type=int, default=None)
     dp.add_argument("--page-buffer", type=int, default=2)
     dp.add_argument("--force-refresh-pages", type=int, default=0, metavar="N")
+    dp.add_argument(
+        "--start-page",
+        type=int,
+        default=0,
+        help="Resume catch-up from this newest-first page index",
+    )
     dp.add_argument(
         "--workers",
         type=int,

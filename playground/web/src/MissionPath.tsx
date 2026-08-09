@@ -1,10 +1,11 @@
 import { Suspense, useMemo, useRef, useEffect } from "react";
 import { Canvas, ThreeEvent, useFrame } from "@react-three/fiber";
-import { OrbitControls, Line, Html } from "@react-three/drei";
+import { OrbitControls, Line } from "@react-three/drei";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { MapWaypoint, Stop } from "./api";
 import RoverModel from "./RoverModel";
+import Terrain from "./Terrain";
 
 export type PathNode = {
   id: string;
@@ -20,18 +21,26 @@ export type PathNode = {
   label: string;
 };
 
+/** Path sits just above the flat basemap (y=0) to avoid z-fighting. */
+export const MAP_SURFACE_Y = 0;
+export const MAP_PATH_Y = 0.04;
+
 function scaleEn(
   easting: number,
   northing: number,
-  elev: number | null | undefined,
+  _elev: number | null | undefined,
   originE: number,
   originN: number,
-  metersPerUnit: number
+  metersPerUnit: number,
+  /** Flatten onto basemap plane (default). Elev would float the path above the orthophoto. */
+  flat = true
 ): [number, number, number] {
-  // X = east, Z = -north (so +Z is south-ish; orbit feels natural), Y = elev
+  // X = east, Z = -north (so +Z is south-ish; orbit feels natural)
   const x = (easting - originE) / metersPerUnit;
   const z = -(northing - originN) / metersPerUnit;
-  const y = elev != null && elev > -9000 ? (elev + 2500) / metersPerUnit : 0;
+  if (flat) return [x, MAP_PATH_Y, z];
+  const y =
+    _elev != null && _elev > -9000 ? (_elev + 2500) / metersPerUnit : MAP_PATH_Y;
   return [x, y, z];
 }
 
@@ -64,14 +73,15 @@ export function layoutFromWaypoints(
       const key = `${w.site}_${w.drive}`;
       const stop = stopsByKey.get(key) ?? null;
       const posed = stop?.n_posed ?? 0;
-      const radius = 0.12 + 0.28 * Math.sqrt(Math.max(posed, 1) / maxPosed);
+      const radius = 0.1 + 0.2 * Math.sqrt(Math.max(posed, 1) / maxPosed);
       const position = scaleEn(
         w.easting as number,
         w.northing as number,
         w.elev_geoid,
         originE,
         originN,
-        metersPerUnit
+        metersPerUnit,
+        true // always on basemap surface
       );
       return {
         id: key,
@@ -108,7 +118,8 @@ export function lineThroughWaypoints(
       w.elev_geoid,
       originE,
       originN,
-      metersPerUnit
+      metersPerUnit,
+      true
     )
   );
 }
@@ -157,22 +168,31 @@ function PathNodes({
   nodes,
   selectedId,
   onSelect,
+  onOpenStop,
 }: {
   nodes: PathNode[];
   selectedId: string | null;
   onSelect: (node: PathNode) => void;
+  onOpenStop?: (node: PathNode) => void;
 }) {
+  // No floating HTML cards — they clutter the basemap. Selection details live in the HUD.
   return (
     <group>
       {nodes.map((n) => {
         const active = n.id === selectedId;
         const color = active ? "#e8a838" : n.hasImages ? "#4db6ac" : "#64748b";
+        // Compact markers; active slightly larger
+        const r = active ? Math.max(n.radius * 0.55, 0.1) : Math.max(n.radius * 0.35, 0.06);
         return (
           <group key={n.id} position={n.position}>
             <mesh
               onClick={(e: ThreeEvent<MouseEvent>) => {
                 e.stopPropagation();
                 onSelect(n);
+              }}
+              onDoubleClick={(e: ThreeEvent<MouseEvent>) => {
+                e.stopPropagation();
+                (onOpenStop ?? onSelect)(n);
               }}
               onPointerOver={(e) => {
                 e.stopPropagation();
@@ -182,45 +202,24 @@ function PathNodes({
                 document.body.style.cursor = "default";
               }}
             >
-              <sphereGeometry args={[n.radius, 20, 20]} />
+              <sphereGeometry args={[r, 14, 14]} />
               <meshStandardMaterial
                 color={color}
                 emissive={color}
-                emissiveIntensity={active ? 0.45 : n.hasImages ? 0.15 : 0.05}
+                emissiveIntensity={active ? 0.5 : n.hasImages ? 0.12 : 0.04}
                 metalness={0.2}
                 roughness={0.45}
               />
             </mesh>
-            {/* yaw tick */}
-            {n.yawDeg != null && (
+            {n.yawDeg != null && active && (
               <mesh
                 rotation={[0, (-n.yawDeg * Math.PI) / 180, 0]}
                 position={[0, 0.02, 0]}
               >
-                <boxGeometry args={[0.04, 0.04, n.radius * 2.2]} />
-                <meshBasicMaterial color="#94a3b8" />
+                <boxGeometry args={[0.03, 0.03, r * 2.4]} />
+                <meshBasicMaterial color="#e2e8f0" />
               </mesh>
             )}
-            <Html
-              position={[0, n.radius + 0.14, 0]}
-              center
-              style={{ pointerEvents: "none" }}
-            >
-              <div className={"path3d-label" + (active ? " active" : "")}>
-                <strong>sol {n.sol ?? "?"}</strong>
-                <span>
-                  {n.site}/{n.drive}
-                </span>
-                <span className="muted">
-                  {n.hasImages
-                    ? `${n.stop?.n_posed ?? 0} posed`
-                    : "map only"}
-                  {n.distTotalM != null
-                    ? ` · ${(n.distTotalM / 1000).toFixed(1)} km`
-                    : ""}
-                </span>
-              </div>
-            </Html>
           </group>
         );
       })}
@@ -233,6 +232,29 @@ function PathLine({ points }: { points: [number, number, number][] }) {
   return (
     <Line points={points} color="#94a3b8" lineWidth={2} transparent opacity={0.9} />
   );
+}
+
+function nodeToStop(n: PathNode): Stop | null {
+  if (n.stop) return n.stop;
+  if (n.site == null || n.drive == null) return null;
+  return {
+    stop_id: n.id,
+    site: n.site,
+    drive: n.drive,
+    n_images: 0,
+    n_posed: 0,
+    pose_frac: 0,
+    sol_min: n.sol,
+    sol_max: n.sol,
+    n_sols: 1,
+    n_instruments: 0,
+    instruments: {},
+    n_navcam: 0,
+    n_mcz: 0,
+    n_stereo_capable: 0,
+    lon: null,
+    lat: null,
+  };
 }
 
 function FramePath({ nodes }: { nodes: PathNode[] }) {
@@ -278,13 +300,22 @@ export default function MissionPath({
   waypoints,
   selectedStopId,
   onSelectStop,
+  onOpenStop,
   mapAvailable,
+  basemapLayer = "ctx",
+  showBasemap = true,
 }: {
   stops: Stop[];
   waypoints?: MapWaypoint[];
   selectedStopId: string | null;
+  /** Single click: select / place rover (stay on path). */
   onSelectStop: (stop: Stop) => void;
+  /** Double-click: open stop camera view. */
+  onOpenStop?: (stop: Stop) => void;
   mapAvailable?: boolean;
+  /** FU Berlin Jezero WMS layer key: ctx | hirise | hrsc | base */
+  basemapLayer?: string;
+  showBasemap?: boolean;
 }) {
   const stopsByKey = useMemo(() => {
     const m = new Map<string, Stop>();
@@ -318,58 +349,58 @@ export default function MissionPath({
     return current ?? null;
   }, [nodes, selectedStopId, current]);
 
-  // Path uses ~25 m / scene unit → real 3 m rover ≈ 0.12 units; exaggerate for visibility
-  const roverLength = useMap ? 1.1 : 0.85;
+  // Path uses ~25 m / scene unit → exaggerate rover for map readability
+  const roverLength = useMap ? 0.85 : 0.85;
+
+  // Stable basemap URL (must not change on stop selection or Suspense remounts wipe the texture)
+  const basemapUrl = useMemo(() => {
+    if (!(showBasemap && useMap)) return null;
+    return `/api/map/basemap?layer=${encodeURIComponent(basemapLayer)}&width=2048&height=2048&pad_deg=0.08`;
+  }, [showBasemap, useMap, basemapLayer]);
+
+  const roverPos: [number, number, number] | null = selectedNode
+    ? [selectedNode.position[0], MAP_SURFACE_Y, selectedNode.position[2]]
+    : null;
 
   return (
     <div className="mission-path-wrap">
       <Canvas camera={{ position: [0, 12, 18], fov: 50, near: 0.1, far: 2000 }}>
-        <color attach="background" args={["#0b0f14"]} />
-        <ambientLight intensity={0.55} />
-        <directionalLight position={[8, 14, 6]} intensity={0.9} />
-        <hemisphereLight args={["#b1c4de", "#3d2b1f", 0.35]} />
-        <gridHelper args={[200, 40, "#334155", "#1e293b"]} />
-        <Html position={[0, 0.02, 0]} center>
-          <div className="path3d-axis-label">
-            {useMap
-              ? "Real traverse (MMGIS) · rover model at selected/latest stop · teal = has images"
-              : "Schematic path (map data missing — run fetch_mmgis)"}
-          </div>
-        </Html>
+        <color attach="background" args={["#1a1410"]} />
+        <fog attach="fog" args={["#1a1410", 80, 320]} />
+        <ambientLight intensity={0.6} />
+        <directionalLight position={[8, 14, 6]} intensity={1.1} castShadow />
+        <hemisphereLight args={["#c4a882", "#3d2b1f", 0.45]} />
+        {/* Basemap outside rover Suspense so GLB load never unmounts the map */}
+        {nodes.length > 0 && (
+          <Terrain
+            nodes={nodes}
+            padding={useMap ? 36 : 12}
+            surfaceY={MAP_SURFACE_Y}
+            showBasemap={Boolean(basemapUrl)}
+            basemapUrl={basemapUrl}
+          />
+        )}
+        {!(showBasemap && useMap) && (
+          <gridHelper args={[200, 40, "#5c4030", "#3d2b1f"]} position={[0, -0.05, 0]} />
+        )}
         <PathLine points={pathLine} />
         <PathNodes
           nodes={nodes}
           selectedId={selectedStopId}
           onSelect={(n) => {
-            if (n.stop) {
-              onSelectStop(n.stop);
-            } else if (n.site != null && n.drive != null) {
-              onSelectStop({
-                stop_id: n.id,
-                site: n.site,
-                drive: n.drive,
-                n_images: 0,
-                n_posed: 0,
-                pose_frac: 0,
-                sol_min: n.sol,
-                sol_max: n.sol,
-                n_sols: 1,
-                n_instruments: 0,
-                instruments: {},
-                n_navcam: 0,
-                n_mcz: 0,
-                n_stereo_capable: 0,
-                lon: null,
-                lat: null,
-              });
-            }
+            const stop = nodeToStop(n);
+            if (stop) onSelectStop(stop);
+          }}
+          onOpenStop={(n) => {
+            const stop = nodeToStop(n);
+            if (stop) (onOpenStop ?? onSelectStop)(stop);
           }}
         />
-        {selectedNode && (
+        {roverPos && (
           <Suspense fallback={null}>
             <RoverModel
-              position={selectedNode.position}
-              yawDeg={selectedNode.yawDeg}
+              position={roverPos}
+              yawDeg={selectedNode?.yawDeg}
               frame="map"
               targetLength={roverLength}
               ground
@@ -390,10 +421,14 @@ export default function MissionPath({
             {" · "}
             rover @ sol {selectedNode.sol ?? "?"} ({selectedNode.site}/
             {selectedNode.drive})
+            {selectedNode.hasImages && (
+              <span className="muted"> · click again / Open stop for cameras</span>
+            )}
           </>
         )}
         <div className="muted">
-          Click a node to place the rover and open stop cameras. Model: NASA/JPL-Caltech.
+          Click a node to place the rover; double-click for cameras. Model:
+          NASA/JPL-Caltech. Basemap: FU Berlin / maps.planet.fu-berlin.de (CTX).
         </div>
       </div>
     </div>
