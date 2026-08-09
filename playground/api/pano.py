@@ -169,6 +169,36 @@ def _frame_basis(row: pd.Series) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return look, up, right
 
 
+def _az_el_to_dir(az: np.ndarray, el: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Body-frame unit directions from az/el (same convention as look_az_el)."""
+    ce = np.cos(el)
+    rx = ce * np.cos(az)
+    ry = ce * np.sin(az)
+    rz = -np.sin(el)
+    return rx, ry, rz
+
+
+def _sample_bilinear(bgr: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Bilinear sample BGR image at float coords (N,) → (N, 3) float32."""
+    H, W = bgr.shape[:2]
+    u0 = np.floor(u).astype(np.int32)
+    v0 = np.floor(v).astype(np.int32)
+    u1 = np.clip(u0 + 1, 0, W - 1)
+    v1 = np.clip(v0 + 1, 0, H - 1)
+    u0 = np.clip(u0, 0, W - 1)
+    v0 = np.clip(v0, 0, H - 1)
+    du = (u - u0).astype(np.float32)[:, None]
+    dv = (v - v0).astype(np.float32)[:, None]
+    img = bgr.astype(np.float32)
+    Ia = img[v0, u0]
+    Ib = img[v0, u1]
+    Ic = img[v1, u0]
+    Id = img[v1, u1]
+    top = Ia * (1.0 - du) + Ib * du
+    bot = Ic * (1.0 - du) + Id * du
+    return top * (1.0 - dv) + bot * dv
+
+
 def project_frame_to_cylinder(
     bgr: np.ndarray,
     look: np.ndarray,
@@ -184,7 +214,11 @@ def project_frame_to_cylinder(
     el_min: float,
     el_span: float,
 ) -> int:
-    """Splat one frame onto cylindrical canvas (azimuth × elevation). Returns pixel count."""
+    """Inverse-map canvas pixels into the frame (bilinear) — no sparse holes.
+
+    For each canvas pixel in the frame's FOV footprint, compute the body-frame
+    ray from az/el, project into the camera, and bilinear-sample the source.
+    """
     assert cv2 is not None
     H, W = bgr.shape[:2]
     out_h, out_w = canvas.shape[:2]
@@ -192,52 +226,97 @@ def project_frame_to_cylinder(
     vfov = math.radians(float(vfov_deg) if vfov_deg and vfov_deg > 1 else 34.0)
     fx = (W * 0.5) / math.tan(hfov * 0.5)
     fy = (H * 0.5) / math.tan(vfov * 0.5)
+    cx_img = (W - 1) * 0.5
+    cy_img = (H - 1) * 0.5
 
-    # Subsample source for speed on large thumbs
-    step = 1 if max(H, W) <= 400 else 2
-    us = np.arange(0, W, step, dtype=np.float64)
-    vs = np.arange(0, H, step, dtype=np.float64)
+    # Footprint: project a dense grid of source corners/edges → canvas bbox
+    # (forward map only to size the ROI — dense fill uses inverse)
+    step_fwd = max(1, min(H, W) // 48)
+    us = np.linspace(0, W - 1, max(8, W // step_fwd))
+    vs = np.linspace(0, H - 1, max(8, H // step_fwd))
     uu, vv = np.meshgrid(us, vs)
-    # Camera rays: +look, +right * x, −up * y  (y image-down)
-    x = (uu - (W - 1) * 0.5) / fx
-    y = (vv - (H - 1) * 0.5) / fy
-    # ray = look + right*x - up*y
+    x = (uu - cx_img) / fx
+    y = (vv - cy_img) / fy
     rx = look[0] + right[0] * x - up[0] * y
     ry = look[1] + right[1] * x - up[1] * y
     rz = look[2] + right[2] * x - up[2] * y
-    norm = np.sqrt(rx * rx + ry * ry + rz * rz) + 1e-12
-    rx, ry, rz = rx / norm, ry / norm, rz / norm
-
+    nrm = np.sqrt(rx * rx + ry * ry + rz * rz) + 1e-12
+    rx, ry, rz = rx / nrm, ry / nrm, rz / nrm
     az = np.arctan2(ry, rx)
     el = np.arctan2(-rz, np.hypot(rx, ry))
+    # Map to canvas x; also ±2π for full-sphere wraps
+    cands = [((az - az_min) / az_span) * out_w]
+    if az_span > math.radians(300):
+        cands.append(((az - az_min + 2 * math.pi) / az_span) * out_w)
+        cands.append(((az - az_min - 2 * math.pi) / az_span) * out_w)
+    cx = np.concatenate([c.ravel() for c in cands])
+    cy_one = (((el_min + el_span - el) / el_span) * out_h).ravel()
+    cy = np.concatenate([cy_one] * len(cands))
+    valid = np.isfinite(cx) & np.isfinite(cy)
+    if not np.any(valid):
+        return 0
+    cxv, cyv = cx[valid], cy[valid]
+    # Keep points that land in or near the canvas
+    near = (cxv > -out_w * 0.05) & (cxv < out_w * 1.05) & (cyv > -5) & (cyv < out_h + 5)
+    if not np.any(near):
+        return 0
+    cxv, cyv = cxv[near], cyv[near]
+    pad = 3
+    x0 = int(max(0, math.floor(float(cxv.min())) - pad))
+    x1 = int(min(out_w, math.ceil(float(cxv.max())) + pad + 1))
+    y0 = int(max(0, math.floor(float(cyv.min())) - pad))
+    y1 = int(min(out_h, math.ceil(float(cyv.max())) + pad + 1))
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    # Wide FOV near wrap: fill whole width strip for that elevation band
+    if az_span > math.radians(300) and (x1 - x0) > out_w * 0.7:
+        x0, x1 = 0, out_w
 
-    # Canvas coordinates
-    cx = ((az - az_min) / az_span) * out_w
-    cy = ((el_min + el_span - el) / el_span) * out_h  # el up → row decreases
-    cx_i = np.rint(cx).astype(np.int32)
-    cy_i = np.rint(cy).astype(np.int32)
-    m = (cx_i >= 0) & (cx_i < out_w) & (cy_i >= 0) & (cy_i < out_h)
-    if not np.any(m):
+    cols = np.arange(x0, x1, dtype=np.float64)
+    rows = np.arange(y0, y1, dtype=np.float64)
+    if cols.size == 0 or rows.size == 0:
+        return 0
+    cc, rr = np.meshgrid(cols, rows)
+    az_p = az_min + (cc + 0.5) / out_w * az_span
+    el_p = el_min + el_span - (rr + 0.5) / out_h * el_span
+    dx, dy, dz = _az_el_to_dir(az_p, el_p)
+
+    # Camera coordinates: z along look, x right, y image-down
+    zc = dx * look[0] + dy * look[1] + dz * look[2]
+    xc = dx * right[0] + dy * right[1] + dz * right[2]
+    yc = -(dx * up[0] + dy * up[1] + dz * up[2])
+
+    in_front = zc > 0.05
+    zc_safe = np.where(in_front, zc, 1.0)
+    u = fx * (xc / zc_safe) + cx_img
+    v = fy * (yc / zc_safe) + cy_img
+    margin = 0.5
+    in_img = (
+        in_front
+        & (u >= margin)
+        & (u <= W - 1 - margin)
+        & (v >= margin)
+        & (v <= H - 1 - margin)
+    )
+    if not np.any(in_img):
         return 0
 
-    # Feather weight: higher near optical center
-    wu = 1.0 - np.abs(uu - (W - 1) * 0.5) / (W * 0.5 + 1e-6)
-    wv = 1.0 - np.abs(vv - (H - 1) * 0.5) / (H * 0.5 + 1e-6)
-    wgt = np.clip(wu, 0, 1) * np.clip(wv, 0, 1)
-    wgt = wgt * wgt + 0.05
+    uu = u[in_img]
+    vv = v[in_img]
+    oy = rr[in_img].astype(np.int32)
+    ox = cc[in_img].astype(np.int32)
+    pix = _sample_bilinear(bgr, uu, vv)
 
-    ui = uu[m].astype(np.int32)
-    vi = vv[m].astype(np.int32)
-    ox = cx_i[m]
-    oy = cy_i[m]
-    ww = wgt[m].astype(np.float32)
-    pix = bgr[vi, ui].astype(np.float32)
+    # Feather: higher weight near optical center, soft edge falloff
+    nu = np.abs(uu - cx_img) / (W * 0.5)
+    nv = np.abs(vv - cy_img) / (H * 0.5)
+    edge = np.clip(1.0 - np.maximum(nu, nv), 0.0, 1.0)
+    wgt = (0.2 + 0.8 * (edge * edge)).astype(np.float32)
 
-    # Accumulate (vectorized scatter-add via loop on unique — numpy add.at)
     for c in range(3):
-        np.add.at(canvas[:, :, c], (oy, ox), pix[:, c] * ww)
-    np.add.at(weight, (oy, ox), ww)
-    return int(m.sum())
+        np.add.at(canvas[:, :, c], (oy, ox), pix[:, c] * wgt)
+    np.add.at(weight, (oy, ox), wgt)
+    return int(in_img.sum())
 
 
 def _url_for_size(row: pd.Series, size: str) -> Optional[str]:
@@ -257,11 +336,12 @@ def _url_for_size(row: pd.Series, size: str) -> Optional[str]:
 
 
 # Max source edge length per tier (keeps memory bounded on 4–8GB machines)
+# Higher than before — inverse mapping needs dense source detail.
 _SIZE_MAX_SIDE = {
-    "small": 480,
-    "medium": 960,
-    "large": 1600,
-    "full": 2048,
+    "small": 720,
+    "medium": 1280,
+    "large": 1920,
+    "full": 2560,
 }
 
 
@@ -384,21 +464,60 @@ def stitch_pose_pano(
     if not used or float(weight.max()) <= 0:
         raise RuntimeError("no frames projected (image fetch or pose failed)")
 
-    w = weight[:, :, None]
+    wmap = weight.copy()
+    w = wmap[:, :, None]
     w = np.maximum(w, 1e-6)
     rgb = np.clip(canvas / w, 0, 255).astype(np.uint8)
-    empty = weight < 1e-5
+    empty = wmap < 1e-4
+    # Mild inpaint-style hole fill: dilate known pixels into empty (reduces speckles)
+    if empty.any() and _HAS_CV2:
+        known = (~empty).astype(np.uint8) * 255
+        for _ in range(3):
+            dil = cv2.dilate(known, np.ones((3, 3), np.uint8), iterations=1)
+            ring = (dil > 0) & empty
+            if not ring.any():
+                break
+            blurred = cv2.GaussianBlur(rgb, (5, 5), 0)
+            rgb[ring] = blurred[ring]
+            empty = empty & ~ring
+            known = (~empty).astype(np.uint8) * 255
+            wmap[ring] = 1e-3
     rgb[empty] = (28, 24, 20)
 
+    # Crop empty borders (keep a small pad) so viewers don't zoom empty sky/ground
+    if projection != "equirect" and (wmap > 1e-4).any():
+        ys, xs = np.where(wmap > 1e-4)
+        pad = 8
+        y0 = max(0, int(ys.min()) - pad)
+        y1 = min(rgb.shape[0], int(ys.max()) + pad + 1)
+        x0 = max(0, int(xs.min()) - pad)
+        x1 = min(rgb.shape[1], int(xs.max()) + pad + 1)
+        if (y1 - y0) >= 64 and (x1 - x0) >= 128:
+            # rescale angular meta for crop
+            az_min_c = az_min + (x0 / out_width) * az_span
+            az_span_c = ((x1 - x0) / out_width) * az_span
+            el_max = el_min + el_span
+            el_max_c = el_max - (y0 / out_height) * el_span
+            el_min_c = el_max - (y1 / out_height) * el_span
+            az_min, az_span = az_min_c, az_span_c
+            el_min, el_span = el_min_c, el_max_c - el_min_c
+            rgb = rgb[y0:y1, x0:x1]
+            out_height, out_width = rgb.shape[:2]
+
+    # Light denoise only on tiny residual speckles (preserve detail)
+    if _HAS_CV2 and used:
+        rgb = cv2.bilateralFilter(rgb, d=3, sigmaColor=10, sigmaSpace=3)
+
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # v2 in key: invalidate old sparse/pixelated cache
     key_src = (
-        f"{frames.iloc[0].get('site')}_{frames.iloc[0].get('drive')}_"
+        f"v2inv_{frames.iloc[0].get('site')}_{frames.iloc[0].get('drive')}_"
         f"{projection}_{thumb_size}_{max_side}_{len(used)}_{out_width}x{out_height}_"
         + ",".join(u["imageid"] for u in used[:12])
     )
     key = hashlib.sha256(key_src.encode()).hexdigest()[:20]
     out_path = CACHE_DIR / f"pano_{key}.jpg"
-    quality = 90 if projection == "equirect" else 88
+    quality = 92 if projection == "equirect" else 90
     cv2.imwrite(str(out_path), rgb, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
     return {

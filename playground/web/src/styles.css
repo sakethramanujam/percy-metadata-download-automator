@@ -700,10 +700,13 @@ button.linkish {
 .pano-stage img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* contain keeps full resolution readable; cover was zoom-cropping and looking blocky */
+  object-fit: contain;
   object-position: 50% 50%;
   pointer-events: none;
   display: block;
+  image-rendering: auto;
+  background: #0a0c10;
 }
 
 .pano-size-select {

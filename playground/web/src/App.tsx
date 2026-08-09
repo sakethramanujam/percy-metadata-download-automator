@@ -91,7 +91,7 @@ export default function App() {
   const [panoMeta, setPanoMeta] = useState<string | null>(null);
   const [panoError, setPanoError] = useState<string | null>(null);
   const [panoSrc, setPanoSrc] = useState<string | null>(null);
-  const [panoSize, setPanoSize] = useState<PanoSourceSize>("medium");
+  const [panoSize, setPanoSize] = useState<PanoSourceSize>("large");
   const [panoProjection, setPanoProjection] =
     useState<PanoProjection>("cylinder");
   const [coverage, setCoverage] = useState<CoverageResult | null>(null);
