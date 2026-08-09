@@ -281,7 +281,11 @@ export default function PhotoSphere({
           alt="Site equirect panorama"
           draggable={false}
           style={{ objectPosition: `${posX}% ${posY}%` }}
-          onLoad={() => setImgOk(true)}
+          onLoad={() => {
+            setImgOk(true);
+            // Try 3D after flat image is proven; falls back if WebGL fails
+            setMode("gl");
+          }}
           onError={() =>
             setImgError(
               "Could not display pano image. Try Download or re-stitch."
