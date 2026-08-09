@@ -544,6 +544,11 @@ def api_stop_pano(
         pattern="^(cylinder|equirect)$",
         description="cylinder = adaptive crop; equirect = full 360×180 export",
     ),
+    align: str = Query(
+        "hybrid",
+        pattern="^(pose|hybrid|feature)$",
+        description="pose = metadata only; hybrid/feature = pose + ORB/SIFT residual align",
+    ),
     instrument: Optional[list[str]] = Query(
         None, description="e.g. NAVCAM_LEFT — default prefers NAVCAM"
     ),
@@ -551,7 +556,7 @@ def api_stop_pano(
     sol_max: Optional[int] = None,
     meta_only: bool = Query(False, description="Return JSON only (no JPEG body)"),
 ):
-    """Pose-driven panorama for a stop (body-frame look/up/FOV)."""
+    """Pose-driven panorama for a stop (body-frame look/up/FOV + optional feature refine)."""
     if not has_opencv():
         raise HTTPException(status_code=501, detail="OpenCV required for pano encode")
     try:
@@ -566,6 +571,7 @@ def api_stop_pano(
             thumb_size=size,
             max_side=max_side,
             projection=projection,
+            align=align,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -585,6 +591,10 @@ def api_stop_pano(
         "el_span_deg": result["el_span_deg"],
         "method": result["method"],
         "projection": result.get("projection", projection),
+        "align": result.get("align", align),
+        "n_feature_refined": result.get("n_feature_refined"),
+        "n_exposure_adjusted": result.get("n_exposure_adjusted"),
+        "feature_backends": result.get("feature_backends"),
         "frame": result["frame"],
         "elapsed_ms": result["elapsed_ms"],
         "source_size": result.get("source_size"),
@@ -593,6 +603,7 @@ def api_stop_pano(
         "url": (
             f"/api/stops/{site}/{drive}/pano?max_frames={max_frames}"
             f"&out_width={out_width}&size={size}&projection={projection}"
+            f"&align={align}"
             + (f"&max_side={max_side}" if max_side else "")
         ),
     }
@@ -603,6 +614,8 @@ def api_stop_pano(
         "X-Pano-Frames": str(result["n_frames"]),
         "X-Pano-Method": str(result["method"]),
         "X-Pano-Projection": str(result.get("projection", projection)),
+        "X-Pano-Align": str(result.get("align", align)),
+        "X-Pano-Feature-Refined": str(result.get("n_feature_refined", 0)),
         "X-Pano-Az-Span-Deg": f"{result['az_span_deg']:.1f}",
         "X-Pano-Elapsed-Ms": f"{result['elapsed_ms']:.0f}",
         "Cache-Control": "public, max-age=3600",

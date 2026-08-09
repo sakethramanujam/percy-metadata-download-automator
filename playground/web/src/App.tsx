@@ -778,6 +778,7 @@ export default function App() {
           out_width: outW,
           size: useSize,
           projection,
+          align: "hybrid",
         }) + `&t=${Date.now()}`;
 
       const r = await fetch(url);
@@ -815,10 +816,14 @@ export default function App() {
       const method = r.headers.get("X-Pano-Method");
       const az = r.headers.get("X-Pano-Az-Span-Deg");
       const ms = r.headers.get("X-Pano-Elapsed-Ms");
+      const feat = r.headers.get("X-Pano-Feature-Refined");
+      const alignHdr = r.headers.get("X-Pano-Align");
       setPanoMeta(
         [
           frames ? `${frames} frames` : null,
           projection,
+          alignHdr || "hybrid",
+          feat != null ? `${feat} feature-aligned` : null,
           useSize,
           az ? `az ${Number(az).toFixed(0)}°` : null,
           ms ? `${Number(ms).toFixed(0)} ms` : null,

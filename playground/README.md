@@ -83,8 +83,8 @@ Vite proxies `/api` to the backend on this machine.
 - **Site multi-drive world**: all drives at one site placed into a shared EN frame (MMGIS easting/northing/yaw + body poses) with photo planes and traverse polyline
 - **Guided sol tour**: auto-built mission highlights (path → stop → site) with captions, play/next, keyboard, and deep links `?tour=mission-highlights&step=`
 - **Coverage heatmap**: body-frame azimuth × elevation look density (+ soft FOV) per stop; useful-band % for science QA
-- **Equirect pano export**: pose-driven full 360×180 JPEG (`projection=equirect`) with in-viewer Download
-- **Photo sphere**: immersive Three.js sphere with equirect texture; drag to look, scroll FOV, heading readout; Flat view toggle
+- **Equirect pano export**: pose layout + hybrid feature refine (ECC/phase/SIFT residual align + exposure match); `align=hybrid|pose`
+- **Photo sphere**: immersive / flat equirect viewer; drag to look; Download JPEG
 - **Perseverance 3D model** (NASA/JPL-Caltech glTF) on the mission path (selected/latest waypoint) and in stop camera view
 
 ## Rover 3D model

@@ -199,6 +199,110 @@ def _sample_bilinear(bgr: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarra
     return top * (1.0 - dv) + bot * dv
 
 
+def _frame_canvas_samples(
+    bgr: np.ndarray,
+    look: np.ndarray,
+    up: np.ndarray,
+    right: np.ndarray,
+    hfov_deg: float,
+    vfov_deg: float,
+    *,
+    out_w: int,
+    out_h: int,
+    az_min: float,
+    az_span: float,
+    el_min: float,
+    el_span: float,
+    az_shift_px: float = 0.0,
+    el_shift_px: float = 0.0,
+) -> Optional[dict[str, np.ndarray]]:
+    """Inverse-project one frame → canvas samples (ox, oy, pix, wgt)."""
+    H, W = bgr.shape[:2]
+    hfov = math.radians(float(hfov_deg) if hfov_deg and hfov_deg > 1 else 45.0)
+    vfov = math.radians(float(vfov_deg) if vfov_deg and vfov_deg > 1 else 34.0)
+    fx = (W * 0.5) / math.tan(hfov * 0.5)
+    fy = (H * 0.5) / math.tan(vfov * 0.5)
+    cx_img = (W - 1) * 0.5
+    cy_img = (H - 1) * 0.5
+
+    step_fwd = max(1, min(H, W) // 48)
+    us = np.linspace(0, W - 1, max(8, W // step_fwd))
+    vs = np.linspace(0, H - 1, max(8, H // step_fwd))
+    uu, vv = np.meshgrid(us, vs)
+    x = (uu - cx_img) / fx
+    y = (vv - cy_img) / fy
+    rx = look[0] + right[0] * x - up[0] * y
+    ry = look[1] + right[1] * x - up[1] * y
+    rz = look[2] + right[2] * x - up[2] * y
+    nrm = np.sqrt(rx * rx + ry * ry + rz * rz) + 1e-12
+    rx, ry, rz = rx / nrm, ry / nrm, rz / nrm
+    az = np.arctan2(ry, rx)
+    el = np.arctan2(-rz, np.hypot(rx, ry))
+    cands = [((az - az_min) / az_span) * out_w]
+    if az_span > math.radians(300):
+        cands.append(((az - az_min + 2 * math.pi) / az_span) * out_w)
+        cands.append(((az - az_min - 2 * math.pi) / az_span) * out_w)
+    cx = np.concatenate([c.ravel() for c in cands]) + az_shift_px
+    cy_one = (((el_min + el_span - el) / el_span) * out_h).ravel()
+    cy = np.concatenate([cy_one] * len(cands)) + el_shift_px
+    valid = np.isfinite(cx) & np.isfinite(cy)
+    if not np.any(valid):
+        return None
+    cxv, cyv = cx[valid], cy[valid]
+    near = (cxv > -out_w * 0.05) & (cxv < out_w * 1.05) & (cyv > -5) & (cyv < out_h + 5)
+    if not np.any(near):
+        return None
+    cxv, cyv = cxv[near], cyv[near]
+    pad = 3
+    x0 = int(max(0, math.floor(float(cxv.min())) - pad))
+    x1 = int(min(out_w, math.ceil(float(cxv.max())) + pad + 1))
+    y0 = int(max(0, math.floor(float(cyv.min())) - pad))
+    y1 = int(min(out_h, math.ceil(float(cyv.max())) + pad + 1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    if az_span > math.radians(300) and (x1 - x0) > out_w * 0.7:
+        x0, x1 = 0, out_w
+
+    cols = np.arange(x0, x1, dtype=np.float64)
+    rows = np.arange(y0, y1, dtype=np.float64)
+    if cols.size == 0 or rows.size == 0:
+        return None
+    cc, rr = np.meshgrid(cols, rows)
+    # Undo pixel shift when sampling rays so shift moves the splat
+    az_p = az_min + (cc + 0.5 - az_shift_px) / out_w * az_span
+    el_p = el_min + el_span - (rr + 0.5 - el_shift_px) / out_h * el_span
+    dx, dy, dz = _az_el_to_dir(az_p, el_p)
+
+    zc = dx * look[0] + dy * look[1] + dz * look[2]
+    xc = dx * right[0] + dy * right[1] + dz * right[2]
+    yc = -(dx * up[0] + dy * up[1] + dz * up[2])
+    in_front = zc > 0.05
+    zc_safe = np.where(in_front, zc, 1.0)
+    u = fx * (xc / zc_safe) + cx_img
+    v = fy * (yc / zc_safe) + cy_img
+    margin = 0.5
+    in_img = (
+        in_front
+        & (u >= margin)
+        & (u <= W - 1 - margin)
+        & (v >= margin)
+        & (v <= H - 1 - margin)
+    )
+    if not np.any(in_img):
+        return None
+
+    uu = u[in_img]
+    vv = v[in_img]
+    oy = rr[in_img].astype(np.int32)
+    ox = cc[in_img].astype(np.int32)
+    pix = _sample_bilinear(bgr, uu, vv)
+    nu = np.abs(uu - cx_img) / (W * 0.5)
+    nv = np.abs(vv - cy_img) / (H * 0.5)
+    edge = np.clip(1.0 - np.maximum(nu, nv), 0.0, 1.0)
+    wgt = (0.15 + 0.85 * (edge * edge)).astype(np.float32)
+    return {"ox": ox, "oy": oy, "pix": pix, "wgt": wgt, "n": int(in_img.sum())}
+
+
 def project_frame_to_cylinder(
     bgr: np.ndarray,
     look: np.ndarray,
@@ -213,110 +317,280 @@ def project_frame_to_cylinder(
     az_span: float,
     el_min: float,
     el_span: float,
+    az_shift_px: float = 0.0,
+    el_shift_px: float = 0.0,
 ) -> int:
-    """Inverse-map canvas pixels into the frame (bilinear) — no sparse holes.
-
-    For each canvas pixel in the frame's FOV footprint, compute the body-frame
-    ray from az/el, project into the camera, and bilinear-sample the source.
-    """
-    assert cv2 is not None
-    H, W = bgr.shape[:2]
+    """Inverse-map canvas pixels into the frame (bilinear) and accumulate."""
     out_h, out_w = canvas.shape[:2]
-    hfov = math.radians(float(hfov_deg) if hfov_deg and hfov_deg > 1 else 45.0)
-    vfov = math.radians(float(vfov_deg) if vfov_deg and vfov_deg > 1 else 34.0)
-    fx = (W * 0.5) / math.tan(hfov * 0.5)
-    fy = (H * 0.5) / math.tan(vfov * 0.5)
-    cx_img = (W - 1) * 0.5
-    cy_img = (H - 1) * 0.5
-
-    # Footprint: project a dense grid of source corners/edges → canvas bbox
-    # (forward map only to size the ROI — dense fill uses inverse)
-    step_fwd = max(1, min(H, W) // 48)
-    us = np.linspace(0, W - 1, max(8, W // step_fwd))
-    vs = np.linspace(0, H - 1, max(8, H // step_fwd))
-    uu, vv = np.meshgrid(us, vs)
-    x = (uu - cx_img) / fx
-    y = (vv - cy_img) / fy
-    rx = look[0] + right[0] * x - up[0] * y
-    ry = look[1] + right[1] * x - up[1] * y
-    rz = look[2] + right[2] * x - up[2] * y
-    nrm = np.sqrt(rx * rx + ry * ry + rz * rz) + 1e-12
-    rx, ry, rz = rx / nrm, ry / nrm, rz / nrm
-    az = np.arctan2(ry, rx)
-    el = np.arctan2(-rz, np.hypot(rx, ry))
-    # Map to canvas x; also ±2π for full-sphere wraps
-    cands = [((az - az_min) / az_span) * out_w]
-    if az_span > math.radians(300):
-        cands.append(((az - az_min + 2 * math.pi) / az_span) * out_w)
-        cands.append(((az - az_min - 2 * math.pi) / az_span) * out_w)
-    cx = np.concatenate([c.ravel() for c in cands])
-    cy_one = (((el_min + el_span - el) / el_span) * out_h).ravel()
-    cy = np.concatenate([cy_one] * len(cands))
-    valid = np.isfinite(cx) & np.isfinite(cy)
-    if not np.any(valid):
-        return 0
-    cxv, cyv = cx[valid], cy[valid]
-    # Keep points that land in or near the canvas
-    near = (cxv > -out_w * 0.05) & (cxv < out_w * 1.05) & (cyv > -5) & (cyv < out_h + 5)
-    if not np.any(near):
-        return 0
-    cxv, cyv = cxv[near], cyv[near]
-    pad = 3
-    x0 = int(max(0, math.floor(float(cxv.min())) - pad))
-    x1 = int(min(out_w, math.ceil(float(cxv.max())) + pad + 1))
-    y0 = int(max(0, math.floor(float(cyv.min())) - pad))
-    y1 = int(min(out_h, math.ceil(float(cyv.max())) + pad + 1))
-    if x1 <= x0 or y1 <= y0:
-        return 0
-    # Wide FOV near wrap: fill whole width strip for that elevation band
-    if az_span > math.radians(300) and (x1 - x0) > out_w * 0.7:
-        x0, x1 = 0, out_w
-
-    cols = np.arange(x0, x1, dtype=np.float64)
-    rows = np.arange(y0, y1, dtype=np.float64)
-    if cols.size == 0 or rows.size == 0:
-        return 0
-    cc, rr = np.meshgrid(cols, rows)
-    az_p = az_min + (cc + 0.5) / out_w * az_span
-    el_p = el_min + el_span - (rr + 0.5) / out_h * el_span
-    dx, dy, dz = _az_el_to_dir(az_p, el_p)
-
-    # Camera coordinates: z along look, x right, y image-down
-    zc = dx * look[0] + dy * look[1] + dz * look[2]
-    xc = dx * right[0] + dy * right[1] + dz * right[2]
-    yc = -(dx * up[0] + dy * up[1] + dz * up[2])
-
-    in_front = zc > 0.05
-    zc_safe = np.where(in_front, zc, 1.0)
-    u = fx * (xc / zc_safe) + cx_img
-    v = fy * (yc / zc_safe) + cy_img
-    margin = 0.5
-    in_img = (
-        in_front
-        & (u >= margin)
-        & (u <= W - 1 - margin)
-        & (v >= margin)
-        & (v <= H - 1 - margin)
+    samp = _frame_canvas_samples(
+        bgr,
+        look,
+        up,
+        right,
+        hfov_deg,
+        vfov_deg,
+        out_w=out_w,
+        out_h=out_h,
+        az_min=az_min,
+        az_span=az_span,
+        el_min=el_min,
+        el_span=el_span,
+        az_shift_px=az_shift_px,
+        el_shift_px=el_shift_px,
     )
-    if not np.any(in_img):
+    if not samp:
         return 0
-
-    uu = u[in_img]
-    vv = v[in_img]
-    oy = rr[in_img].astype(np.int32)
-    ox = cc[in_img].astype(np.int32)
-    pix = _sample_bilinear(bgr, uu, vv)
-
-    # Feather: higher weight near optical center, soft edge falloff
-    nu = np.abs(uu - cx_img) / (W * 0.5)
-    nv = np.abs(vv - cy_img) / (H * 0.5)
-    edge = np.clip(1.0 - np.maximum(nu, nv), 0.0, 1.0)
-    wgt = (0.2 + 0.8 * (edge * edge)).astype(np.float32)
-
+    ox, oy, pix, wgt = samp["ox"], samp["oy"], samp["pix"], samp["wgt"]
     for c in range(3):
         np.add.at(canvas[:, :, c], (oy, ox), pix[:, c] * wgt)
     np.add.at(weight, (oy, ox), wgt)
-    return int(in_img.sum())
+    return int(samp["n"])
+
+
+def warp_frame_layer(
+    bgr: np.ndarray,
+    look: np.ndarray,
+    up: np.ndarray,
+    right: np.ndarray,
+    hfov_deg: float,
+    vfov_deg: float,
+    *,
+    out_w: int,
+    out_h: int,
+    az_min: float,
+    az_span: float,
+    el_min: float,
+    el_span: float,
+    az_shift_px: float = 0.0,
+    el_shift_px: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Pose-warp one frame onto a full canvas-sized layer + soft mask."""
+    layer = np.zeros((out_h, out_w, 3), dtype=np.float32)
+    mask = np.zeros((out_h, out_w), dtype=np.float32)
+    n = project_frame_to_cylinder(
+        bgr,
+        look,
+        up,
+        right,
+        hfov_deg,
+        vfov_deg,
+        layer,
+        mask,
+        az_min=az_min,
+        az_span=az_span,
+        el_min=el_min,
+        el_span=el_span,
+        az_shift_px=az_shift_px,
+        el_shift_px=el_shift_px,
+    )
+    # Normalize color where we accumulated
+    m = mask > 1e-6
+    if m.any():
+        layer[m] = layer[m] / mask[m, None]
+    return layer, mask, n
+
+
+def feature_align_offset(
+    layer: np.ndarray,
+    mask: np.ndarray,
+    mosaic: np.ndarray,
+    mosaic_w: np.ndarray,
+    *,
+    max_shift: float = 120.0,
+) -> tuple[float, float, int, str]:
+    """Align layer→mosaic residual via ECC (preferred) then SIFT/ORB.
+
+    Returns (dx, dy, score, backend). dx>0 shifts layer right on mosaic.
+    """
+    assert cv2 is not None
+    overlap = (mask > 0.05) & (mosaic_w > 0.05)
+    if int(overlap.sum()) < 600:
+        return 0.0, 0.0, 0, "skip_small_overlap"
+
+    ys, xs = np.where(overlap)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0 = max(0, y0 - 4)
+    x0 = max(0, x0 - 4)
+    y1 = min(mask.shape[0], y1 + 4)
+    x1 = min(mask.shape[1], x1 + 4)
+    if (y1 - y0) < 40 or (x1 - x0) < 40:
+        return 0.0, 0.0, 0, "skip_thin_roi"
+
+    # Downscale large ROIs for speed
+    roi_h, roi_w = y1 - y0, x1 - x0
+    scale = 1.0
+    max_roi = 640
+    if max(roi_h, roi_w) > max_roi:
+        scale = max_roi / float(max(roi_h, roi_w))
+        nh, nw = max(32, int(roi_h * scale)), max(32, int(roi_w * scale))
+    else:
+        nh, nw = roi_h, roi_w
+
+    a = np.clip(layer[y0:y1, x0:x1], 0, 255).astype(np.uint8)
+    b = np.clip(mosaic[y0:y1, x0:x1], 0, 255).astype(np.uint8)
+    ma = (mask[y0:y1, x0:x1] > 0.05).astype(np.uint8) * 255
+    mb = (mosaic_w[y0:y1, x0:x1] > 0.05).astype(np.uint8) * 255
+    if scale < 1.0:
+        a = cv2.resize(a, (nw, nh), interpolation=cv2.INTER_AREA)
+        b = cv2.resize(b, (nw, nh), interpolation=cv2.INTER_AREA)
+        ma = cv2.resize(ma, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        mb = cv2.resize(mb, (nw, nh), interpolation=cv2.INTER_NEAREST)
+
+    ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+    gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    # Equalize for robust matching under exposure differences
+    ga = cv2.equalizeHist(cv2.bitwise_and(ga, ma))
+    gb = cv2.equalizeHist(cv2.bitwise_and(gb, mb))
+
+    # --- 1) ECC photometric translation (great for residual pose error) ---
+    try:
+        warp = np.eye(2, 3, dtype=np.float32)
+        criteria = (
+            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+            60,
+            1e-5,
+        )
+        cc, warp = cv2.findTransformECC(
+            gb,  # template = mosaic
+            ga,  # input = layer
+            warp,
+            cv2.MOTION_TRANSLATION,
+            criteria,
+            None,
+            1,
+        )
+        # warp maps input→template; tx,ty are in downscaled ROI pixels
+        dx = float(warp[0, 2]) / scale
+        dy = float(warp[1, 2]) / scale
+        if abs(dx) <= max_shift and abs(dy) <= max_shift and cc > 0.12:
+            score = int(max(1, round(cc * 100)))
+            return dx, dy, score, "ecc"
+    except cv2.error:
+        pass
+
+    # --- 2) Phase correlation (fast global shift) ---
+    try:
+        # windowed phase corr on overlap mask
+        both = (ma > 0) & (mb > 0)
+        if int(both.sum()) > 500:
+            ga_f = ga.astype(np.float32)
+            gb_f = gb.astype(np.float32)
+            ga_f[~both] = 0
+            gb_f[~both] = 0
+            win = cv2.createHanningWindow((nw, nh), cv2.CV_32F)
+            shift, response = cv2.phaseCorrelate(gb_f, ga_f, win)
+            # shift is (dx, dy) of ga relative to gb? OpenCV: src→dst
+            dx = float(shift[0]) / scale
+            dy = float(shift[1]) / scale
+            if response > 0.08 and abs(dx) <= max_shift and abs(dy) <= max_shift:
+                return dx, dy, int(response * 100), "phase"
+    except Exception:
+        pass
+
+    # --- 3) SIFT/ORB sparse matches ---
+    if hasattr(cv2, "SIFT_create"):
+        detector = cv2.SIFT_create(nfeatures=1500)
+        backend = "sift"
+        norm = cv2.NORM_L2
+    else:
+        detector = cv2.ORB_create(nfeatures=1800)
+        backend = "orb"
+        norm = cv2.NORM_HAMMING
+
+    kp1, d1 = detector.detectAndCompute(ga, ma)
+    kp2, d2 = detector.detectAndCompute(gb, mb)
+    if d1 is None or d2 is None or len(kp1) < 10 or len(kp2) < 10:
+        return 0.0, 0.0, 0, f"{backend}_few_keypoints"
+
+    matcher = cv2.BFMatcher(norm, crossCheck=False)
+    raw = matcher.knnMatch(d1, d2, k=2)
+    good = []
+    for pair in raw:
+        if len(pair) < 2:
+            continue
+        m, n = pair
+        if m.distance < 0.8 * n.distance:
+            good.append(m)
+    if len(good) < 8:
+        return 0.0, 0.0, 0, f"{backend}_few_matches"
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
+    M, inliers = cv2.estimateAffinePartial2D(
+        pts1,
+        pts2,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=3.5,
+        maxIters=3000,
+        confidence=0.99,
+    )
+    if M is None or inliers is None:
+        return 0.0, 0.0, 0, f"{backend}_no_model"
+    n_in = int(inliers.sum())
+    if n_in < 6:
+        return 0.0, 0.0, n_in, f"{backend}_weak"
+
+    dx = float(M[0, 2]) / scale
+    dy = float(M[1, 2]) / scale
+    if abs(dx) > max_shift or abs(dy) > max_shift:
+        return 0.0, 0.0, n_in, f"{backend}_shift_clamped"
+    scale_m = math.hypot(float(M[0, 0]), float(M[1, 0]))
+    if scale_m < 0.9 or scale_m > 1.12:
+        return 0.0, 0.0, n_in, f"{backend}_scale_reject"
+    return dx, dy, n_in, backend
+
+
+def exposure_gain(
+    layer: np.ndarray,
+    mask: np.ndarray,
+    mosaic: np.ndarray,
+    mosaic_w: np.ndarray,
+) -> float:
+    """Scalar gain so layer mean matches mosaic in overlap (per-channel avg)."""
+    overlap = (mask > 0.1) & (mosaic_w > 0.1)
+    if int(overlap.sum()) < 200:
+        return 1.0
+    a = layer[overlap].mean(axis=0)
+    b = mosaic[overlap].mean(axis=0)
+    # avoid div0 / wild gains
+    gains = []
+    for i in range(3):
+        if a[i] > 5 and b[i] > 5:
+            gains.append(float(b[i] / a[i]))
+    if not gains:
+        return 1.0
+    g = float(np.median(gains))
+    return float(np.clip(g, 0.6, 1.6))
+
+
+def shift_layer(
+    layer: np.ndarray, mask: np.ndarray, dx: float, dy: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Integer-round translation of layer/mask (border constant 0)."""
+    assert cv2 is not None
+    tx, ty = float(dx), float(dy)
+    if abs(tx) < 0.25 and abs(ty) < 0.25:
+        return layer, mask
+    M = np.array([[1.0, 0.0, tx], [0.0, 1.0, ty]], dtype=np.float32)
+    h, w = mask.shape
+    layer2 = cv2.warpAffine(
+        layer,
+        M,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    mask2 = cv2.warpAffine(
+        mask,
+        M,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    return layer2, mask2
 
 
 def _url_for_size(row: pd.Series, size: str) -> Optional[str]:
@@ -382,8 +656,15 @@ def stitch_pose_pano(
     thumb_size: str = "small",
     max_side: Optional[int] = None,
     projection: str = "cylinder",
+    align: str = "hybrid",
 ) -> dict[str, Any]:
-    """Build pose-driven pano (cylinder crop or full equirect) from frames."""
+    """Build pano from frames.
+
+    align:
+      - pose: metadata look/up/FOV only
+      - hybrid (default): pose warp + ORB/SIFT residual align + exposure match
+      - feature: same as hybrid (pose seed required for spherical layout)
+    """
     if not _HAS_CV2:
         raise RuntimeError("OpenCV required for panorama encode")
     if frames.empty:
@@ -392,6 +673,10 @@ def stitch_pose_pano(
     projection = (projection or "cylinder").lower()
     if projection not in ("cylinder", "equirect"):
         projection = "cylinder"
+    align = (align or "hybrid").lower()
+    if align not in ("pose", "hybrid", "feature"):
+        align = "hybrid"
+    use_features = align in ("hybrid", "feature")
 
     thumb_size = (thumb_size or "small").lower()
     if thumb_size not in _SIZE_MAX_SIDE:
@@ -403,28 +688,38 @@ def stitch_pose_pano(
     out_width = int(max(1024, min(out_width, 8192)))
 
     if projection == "equirect":
-        # Standard 2:1 equirectangular: full sphere
         az_min = -math.pi
         az_span = 2 * math.pi
         el_min = -math.pi / 2
         el_span = math.pi
         out_height = int(max(512, min(out_width // 2, 4096)))
-        method = "pose_equirect_body_frame"
         note_proj = "Equirectangular 360×180 mosaic"
     else:
         az_min, az_span, el_min, el_span = _stitch_bounds_cylinder(frames)
         aspect = az_span / el_span
         out_height = int(max(256, min(out_height, int(out_width / aspect))))
         out_height = min(out_height, 2048)
-        method = "pose_cylinder_body_frame"
         note_proj = "Cylindrical mosaic"
 
-    canvas = np.zeros((out_height, out_width, 3), dtype=np.float32)
+    # Running mosaic in linear light-ish float (BGR)
+    mosaic = np.zeros((out_height, out_width, 3), dtype=np.float32)
     weight = np.zeros((out_height, out_width), dtype=np.float32)
 
     used: list[dict[str, Any]] = []
+    n_refined = 0
+    n_gain = 0
+    align_backends: list[str] = []
     t0 = time.perf_counter()
-    for _, row in frames.iterrows():
+
+    # Sort frames by azimuth so each new one overlaps the previous band
+    def _az_key(row: pd.Series) -> float:
+        look, _, _ = _frame_basis(row)
+        return look_az_el(look)[0]
+
+    order = sorted(range(len(frames)), key=lambda i: _az_key(frames.iloc[i]))
+
+    for idx in order:
+        row = frames.iloc[idx]
         imageid = str(row["imageid"])
         url = _url_for_size(row, thumb_size)
         if not url:
@@ -435,20 +730,52 @@ def stitch_pose_pano(
         except Exception:
             continue
         look, up, right = _frame_basis(row)
-        n = project_frame_to_cylinder(
+        hf = float(row.get("hfov_deg") or 45)
+        vf = float(row.get("vfov_deg") or 34)
+
+        layer, mask, n = warp_frame_layer(
             bgr,
             look,
             up,
             right,
-            float(row.get("hfov_deg") or 45),
-            float(row.get("vfov_deg") or 34),
-            canvas,
-            weight,
+            hf,
+            vf,
+            out_w=out_width,
+            out_h=out_height,
             az_min=az_min,
             az_span=az_span,
             el_min=el_min,
             el_span=el_span,
         )
+        if n <= 0 or float(mask.max()) <= 0:
+            continue
+
+        dx = dy = 0.0
+        n_in = 0
+        backend = "pose"
+        gain = 1.0
+        if float(weight.max()) > 0:
+            # mosaic is sum(color*w); convert to average for exposure + features
+            mosaic_avg = mosaic / np.maximum(weight[:, :, None], 1e-6)
+            if use_features:
+                dx, dy, n_in, backend = feature_align_offset(
+                    layer, mask, mosaic_avg, weight
+                )
+                # Accept small residuals; ECC score is ~cc*100, SIFT uses inliers
+                if n_in >= 5 and (abs(dx) > 0.35 or abs(dy) > 0.35):
+                    layer, mask = shift_layer(layer, mask, dx, dy)
+                    n_refined += 1
+                align_backends.append(backend)
+            gain = exposure_gain(layer, mask, mosaic_avg, weight)
+            if abs(gain - 1.0) > 0.02:
+                n_gain += 1
+            layer = layer * gain
+
+        # Soft blend (mask already FOV-feathered)
+        w_add = np.clip(mask, 0, 1)
+        mosaic += layer * w_add[:, :, None]
+        weight += w_add
+
         az, el = look_az_el(look)
         used.append(
             {
@@ -458,6 +785,11 @@ def stitch_pose_pano(
                 "az_deg": round(math.degrees(az), 2),
                 "el_deg": round(math.degrees(el), 2),
                 "pixels": n,
+                "align_dx": round(dx, 2),
+                "align_dy": round(dy, 2),
+                "align_inliers": n_in,
+                "align_backend": backend,
+                "exposure_gain": round(gain, 3),
             }
         )
 
@@ -465,14 +797,12 @@ def stitch_pose_pano(
         raise RuntimeError("no frames projected (image fetch or pose failed)")
 
     wmap = weight.copy()
-    w = wmap[:, :, None]
-    w = np.maximum(w, 1e-6)
-    rgb = np.clip(canvas / w, 0, 255).astype(np.uint8)
+    w = np.maximum(wmap[:, :, None], 1e-6)
+    rgb = np.clip(mosaic / w, 0, 255).astype(np.uint8)
     empty = wmap < 1e-4
-    # Mild inpaint-style hole fill: dilate known pixels into empty (reduces speckles)
     if empty.any() and _HAS_CV2:
         known = (~empty).astype(np.uint8) * 255
-        for _ in range(3):
+        for _ in range(4):
             dil = cv2.dilate(known, np.ones((3, 3), np.uint8), iterations=1)
             ring = (dil > 0) & empty
             if not ring.any():
@@ -484,7 +814,6 @@ def stitch_pose_pano(
             wmap[ring] = 1e-3
     rgb[empty] = (28, 24, 20)
 
-    # Crop empty borders (keep a small pad) so viewers don't zoom empty sky/ground
     if projection != "equirect" and (wmap > 1e-4).any():
         ys, xs = np.where(wmap > 1e-4)
         pad = 8
@@ -493,7 +822,6 @@ def stitch_pose_pano(
         x0 = max(0, int(xs.min()) - pad)
         x1 = min(rgb.shape[1], int(xs.max()) + pad + 1)
         if (y1 - y0) >= 64 and (x1 - x0) >= 128:
-            # rescale angular meta for crop
             az_min_c = az_min + (x0 / out_width) * az_span
             az_span_c = ((x1 - x0) / out_width) * az_span
             el_max = el_min + el_span
@@ -504,15 +832,20 @@ def stitch_pose_pano(
             rgb = rgb[y0:y1, x0:x1]
             out_height, out_width = rgb.shape[:2]
 
-    # Light denoise only on tiny residual speckles (preserve detail)
+    # Gentle multi-band-ish finish: bilateral keeps edges, softens seams
     if _HAS_CV2 and used:
-        rgb = cv2.bilateralFilter(rgb, d=3, sigmaColor=10, sigmaSpace=3)
+        rgb = cv2.bilateralFilter(rgb, d=5, sigmaColor=18, sigmaSpace=5)
+
+    if use_features:
+        method = f"pose_{projection}_feature_refined"
+    else:
+        method = f"pose_{projection}_body_frame"
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    # v2 in key: invalidate old sparse/pixelated cache
     key_src = (
-        f"v2inv_{frames.iloc[0].get('site')}_{frames.iloc[0].get('drive')}_"
-        f"{projection}_{thumb_size}_{max_side}_{len(used)}_{out_width}x{out_height}_"
+        f"v3feat_{frames.iloc[0].get('site')}_{frames.iloc[0].get('drive')}_"
+        f"{projection}_{align}_{thumb_size}_{max_side}_{len(used)}_"
+        f"{out_width}x{out_height}_"
         + ",".join(u["imageid"] for u in used[:12])
     )
     key = hashlib.sha256(key_src.encode()).hexdigest()[:20]
@@ -520,6 +853,7 @@ def stitch_pose_pano(
     quality = 92 if projection == "equirect" else 90
     cv2.imwrite(str(out_path), rgb, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
+    backends = sorted(set(align_backends)) if align_backends else ["pose"]
     return {
         "path": out_path,
         "width": out_width,
@@ -533,13 +867,22 @@ def stitch_pose_pano(
         "elapsed_ms": (time.perf_counter() - t0) * 1000.0,
         "method": method,
         "projection": projection,
+        "align": align,
+        "n_feature_refined": n_refined,
+        "n_exposure_adjusted": n_gain,
+        "feature_backends": backends,
         "frame": "body (+X fwd, +Y right, +Z down)",
         "source_size": thumb_size,
         "source_max_side": max_side,
         "note": (
-            f"{note_proj} from metadata look/up/right + FOV "
-            "(not feature-based stitching). "
-            f"Source tier={thumb_size}, max edge={max_side}px."
+            f"{note_proj}: pose layout"
+            + (
+                f" + feature residual align ({n_refined}/{len(used)} frames, "
+                f"{','.join(backends)}) + exposure match"
+                if use_features
+                else " (pose only)"
+            )
+            + f". Source tier={thumb_size}, max edge={max_side}px."
         ),
     }
 
@@ -575,6 +918,7 @@ def build_stop_pano(
     thumb_size: str = "small",
     max_side: Optional[int] = None,
     projection: str = "cylinder",
+    align: str = "hybrid",
 ) -> dict[str, Any]:
     frames = select_pano_frames(
         site,
@@ -604,6 +948,7 @@ def build_stop_pano(
         thumb_size=thumb_size,
         max_side=max_side,
         projection=projection,
+        align=align,
     )
     result["site"] = site
     result["drive"] = drive

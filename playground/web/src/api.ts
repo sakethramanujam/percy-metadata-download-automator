@@ -249,6 +249,8 @@ export function fetchMap() {
 export type PanoSourceSize = "small" | "medium" | "large" | "full";
 export type PanoProjection = "cylinder" | "equirect";
 
+export type PanoAlign = "pose" | "hybrid" | "feature";
+
 /** Pose-driven pano for a stop (cylinder crop or full equirect). */
 export function panoUrl(
   site: number,
@@ -258,6 +260,8 @@ export function panoUrl(
     out_width?: number;
     size?: PanoSourceSize;
     projection?: PanoProjection;
+    /** hybrid = pose layout + ORB/SIFT residual align (default) */
+    align?: PanoAlign;
   }
 ) {
   const params = new URLSearchParams({
@@ -265,6 +269,7 @@ export function panoUrl(
     out_width: String(opts?.out_width ?? 4096),
     size: opts?.size ?? "medium",
     projection: opts?.projection ?? "cylinder",
+    align: opts?.align ?? "hybrid",
   });
   return `/api/stops/${site}/${drive}/pano?${params}`;
 }
