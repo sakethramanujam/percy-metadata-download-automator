@@ -436,19 +436,21 @@ body,
 
 .view-toggle {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .view-toggle button {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   cursor: pointer;
   background: #0d131a;
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
-  padding: 8px;
+  padding: 6px 4px;
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.72rem;
 }
 
 .view-toggle button.active {
