@@ -64,14 +64,14 @@ function loadEquirectTexture(url: string): Promise<THREE.Texture> {
 }
 
 function SphereMesh({ texture }: { texture: THREE.Texture }) {
-  // Standard inside-out sphere: BackSide faces the camera at the origin.
-  // scale.x = -1 mirrors so left/right match body-frame az direction.
+  // Invert X so faces point inward (camera at origin sees the texture).
+  // Do not also set BackSide — that would face outward and look black.
   return (
     <mesh scale={[-1, 1, 1]}>
       <sphereGeometry args={[50, 64, 48]} />
       <meshBasicMaterial
         map={texture}
-        side={THREE.BackSide}
+        side={THREE.FrontSide}
         toneMapped={false}
         depthWrite={false}
       />
