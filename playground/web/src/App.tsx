@@ -844,9 +844,12 @@ export default function App() {
   }
 
   function openPhotoSphere() {
-    // Prefer medium for reliable WebGL upload on 4GB GPUs
+    // Prefer medium equirect — reliable decode + enough detail
     const size: PanoSourceSize =
       panoSize === "full" || panoSize === "large" ? "medium" : panoSize || "medium";
+    // Always force sphere view mode up front so the overlay mounts after stitch
+    setPanoViewMode("sphere");
+    setPanoError(null);
     void openSitePano(size, "equirect", { asSphere: true });
   }
 

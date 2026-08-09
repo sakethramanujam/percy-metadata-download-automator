@@ -659,44 +659,98 @@ button.linkish {
   min-height: 320px;
 }
 
-/* Full-app overlay so sphere cannot be zero-height inside the grid */
+/* Full-app overlay — escapes grid height bugs */
 .photo-sphere-overlay {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 200;
   display: flex;
   flex-direction: column;
-  background: #05070a;
+  background: #0a0c10;
+  color: #e7eef7;
 }
 
 .photo-sphere-stage {
   position: relative;
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 200px;
   width: 100%;
   overflow: hidden;
-  background: #05070a;
+  background: #0a0c10;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
 
-.photo-sphere-canvas {
-  position: absolute !important;
+.photo-sphere-stage:active {
+  cursor: grabbing;
+}
+
+/* Always-visible equirect image */
+.photo-sphere-img {
+  position: absolute;
   inset: 0;
-  width: 100% !important;
-  height: 100% !important;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 50%;
+  display: block;
+  pointer-events: none;
+  background: #1a1520;
+  z-index: 1;
 }
 
-.photo-sphere-canvas canvas {
+.photo-sphere-gl {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none; /* drag handled by stage */
+}
+
+.photo-sphere-gl canvas {
   width: 100% !important;
   height: 100% !important;
   display: block !important;
+  pointer-events: none;
 }
 
-.photo-sphere-flat {
+.sphere-status {
   position: absolute;
   inset: 0;
-  cursor: grab;
-  background-color: #0a0c10;
-  background-repeat: no-repeat;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  background: rgba(8, 12, 18, 0.72);
+  color: #e7eef7;
+  font-size: 0.95rem;
+}
+
+.sphere-status.error {
+  color: #f0a0a0;
+}
+
+.sphere-status.gl-wait {
+  background: transparent;
+  justify-content: flex-end;
+  padding-bottom: 48px;
+  font-size: 0.8rem;
+  color: #8b9bb0;
+  pointer-events: none;
+}
+
+.sphere-gl-note {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 6;
+  font-size: 0.72rem;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 4px 8px;
+  border-radius: 4px;
 }
 
 .pano-loading-banner {
