@@ -32,7 +32,16 @@ export type Vec3Like = {
   right_y?: number | null;
   right_z?: number | null;
   instrument?: string | null;
+  /**
+   * body (default): NASA rover body frame, mapped via body→Three.
+   * site_three: already in site EN Three space (X east, Y up, Z −north).
+   */
+  pose_frame?: "body" | "site_three" | null;
 };
+
+function isSiteThree(c: Vec3Like): boolean {
+  return c.pose_frame === "site_three";
+}
 
 function bodyXYZ(
   c: Vec3Like,
@@ -73,12 +82,22 @@ export function mapBodyToThree(x: number, y: number, z: number): THREE.Vector3 {
 
 /** Body-frame point → Three/GLB axes (left, up, forward). */
 export function bodyPosToThree(c: Vec3Like): THREE.Vector3 {
+  if (isSiteThree(c)) {
+    const [x, y, z] = bodyXYZ(c, "pos");
+    return new THREE.Vector3(x, y, z);
+  }
   const [x, y, z] = bodyXYZ(c, "pos");
   return mapBodyToThree(x, y, z);
 }
 
 /** Body-frame direction → Three unit vector. */
 export function bodyDirToThree(c: Vec3Like): THREE.Vector3 {
+  if (isSiteThree(c)) {
+    const [x, y, z] = bodyXYZ(c, "look");
+    const v = new THREE.Vector3(x, y, z);
+    if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 0, 1);
+    return v.normalize();
+  }
   const [x, y, z] = bodyXYZ(c, "look");
   const v = mapBodyToThree(x, y, z);
   if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 0, 1);
@@ -86,6 +105,12 @@ export function bodyDirToThree(c: Vec3Like): THREE.Vector3 {
 }
 
 export function bodyUpToThree(c: Vec3Like): THREE.Vector3 {
+  if (isSiteThree(c)) {
+    const [x, y, z] = bodyXYZ(c, "up");
+    const v = new THREE.Vector3(x, y, z);
+    if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 1, 0);
+    return v.normalize();
+  }
   const [x, y, z] = bodyXYZ(c, "up");
   const v = mapBodyToThree(x, y, z);
   if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 1, 0);
@@ -93,6 +118,16 @@ export function bodyUpToThree(c: Vec3Like): THREE.Vector3 {
 }
 
 export function bodyRightToThree(c: Vec3Like): THREE.Vector3 {
+  if (isSiteThree(c)) {
+    const [x, y, z] = bodyXYZ(c, "right");
+    const v = new THREE.Vector3(x, y, z);
+    if (v.lengthSq() < 1e-12) {
+      return new THREE.Vector3()
+        .crossVectors(bodyDirToThree(c), bodyUpToThree(c))
+        .normalize();
+    }
+    return v.normalize();
+  }
   const [x, y, z] = bodyXYZ(c, "right");
   const v = mapBodyToThree(x, y, z);
   if (v.lengthSq() < 1e-12) {
@@ -146,6 +181,8 @@ export function bodyTupleToThree(
 export const BODY_TO_GLB_OFFSET = new THREE.Vector3(0.02, 0.04, -0.12);
 
 export function bodyPosToThreeAligned(c: Vec3Like): THREE.Vector3 {
+  // site_three already includes map placement + GLB offset
+  if (isSiteThree(c)) return bodyPosToThree(c);
   return bodyPosToThree(c).add(BODY_TO_GLB_OFFSET);
 }
 
@@ -175,4 +212,11 @@ export function bodyTupleToThreeAligned(
     y + BODY_TO_GLB_OFFSET.y,
     z + BODY_TO_GLB_OFFSET.z,
   ];
+}
+
+/** Pass-through for points already in site Three meters. */
+export function siteThreeTuple(
+  t: [number, number, number] | number[]
+): [number, number, number] {
+  return [t[0] ?? 0, t[1] ?? 0, t[2] ?? 0];
 }

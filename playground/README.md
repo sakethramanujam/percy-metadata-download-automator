@@ -80,6 +80,7 @@ Vite proxies `/api` to the backend on this machine.
 - **Stop search**: multi-token filter (`9 0`, sol, rmc) + “posed only”
 - **Rover eye view**: first-person look through a selected image (FOV-matched photo plane); drag to look; ←/→ step images
 - **Stereo depth + body-frame point cloud**: GPU/CPU disparity for a selected L/R pair; back-project into rover body frame and render as a textured 3D cloud in stop view
+- **Site multi-drive world**: all drives at one site placed into a shared EN frame (MMGIS easting/northing/yaw + body poses) with photo planes and traverse polyline
 - **Perseverance 3D model** (NASA/JPL-Caltech glTF) on the mission path (selected/latest waypoint) and in stop camera view
 
 ## Rover 3D model

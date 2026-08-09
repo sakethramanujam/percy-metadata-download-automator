@@ -92,7 +92,65 @@ export type Camera = {
   url_medium: string | null;
   caption: string | null;
   title: string | null;
+  /** MMGIS anchor for site-scale multi-drive world */
+  drive_easting?: number | null;
+  drive_northing?: number | null;
+  drive_yaw_deg?: number | null;
+  drive_stop_id?: string | null;
+  /** body = rover frame; site_three = already in EN site Three meters */
+  pose_frame?: "body" | "site_three" | null;
 };
+
+export type SiteDrive = {
+  site: number;
+  drive: number | null;
+  stop_id?: string | null;
+  sol_min?: number | null;
+  sol_max?: number | null;
+  n_posed?: number;
+  n_images?: number;
+  easting?: number | null;
+  northing?: number | null;
+  yaw_deg?: number | null;
+  lon?: number | null;
+  lat?: number | null;
+  dist_total_m?: number | null;
+};
+
+export type SiteWorld = {
+  site: number;
+  n_drives: number;
+  n_drives_mapped: number;
+  drives: SiteDrive[];
+  cameras: Camera[];
+  total_cameras: number;
+  returned: number;
+  origin_easting: number | null;
+  origin_northing: number | null;
+  frame: string;
+  note?: string;
+};
+
+export function fetchSiteWorld(
+  site: number,
+  opts?: {
+    max_drives?: number;
+    max_per_drive?: number;
+    max_total?: number;
+    sol_min?: number;
+    sol_max?: number;
+  }
+) {
+  const params = new URLSearchParams({
+    max_drives: String(opts?.max_drives ?? 24),
+    max_per_drive: String(opts?.max_per_drive ?? 100),
+    max_total: String(opts?.max_total ?? 1200),
+    posed_only: "true",
+  });
+  if (opts?.sol_min != null) params.set("sol_min", String(opts.sol_min));
+  if (opts?.sol_max != null) params.set("sol_max", String(opts.sol_max));
+  return getJson<SiteWorld>(`/api/sites/${site}/world?${params}`);
+}
 
 async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url);

@@ -22,6 +22,7 @@ from playground.api.data import (
     load_manifest,
     map_bundle,
     reload_indexes,
+    site_world,
     stats,
     stereo_pairs_for_stop,
 )
@@ -251,6 +252,33 @@ def api_traverse(
             detail="No traverse. Run: python -m playground.pipeline.fetch_mmgis",
         )
     return {"segments": segs, "n": len(segs)}
+
+
+@app.get("/api/sites/{site}/world")
+def api_site_world(
+    site: int,
+    max_drives: int = Query(24, ge=1, le=80),
+    max_per_drive: int = Query(120, ge=10, le=500),
+    max_total: int = Query(1500, ge=50, le=5000),
+    posed_only: bool = True,
+    sol_min: Optional[int] = None,
+    sol_max: Optional[int] = None,
+    instrument: Optional[list[str]] = Query(None),
+):
+    """Multi-drive photo world for one site (body poses + MMGIS anchors)."""
+    try:
+        return site_world(
+            site,
+            posed_only=posed_only,
+            max_drives=max_drives,
+            max_per_drive=max_per_drive,
+            max_total=max_total,
+            instruments=instrument,
+            sol_min=sol_min,
+            sol_max=sol_max,
+        )
+    except IndexNotBuiltError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.get("/api/stops/{site}/{drive}/cameras")

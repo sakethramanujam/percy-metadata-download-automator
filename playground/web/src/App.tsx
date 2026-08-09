@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Scene from "./Scene";
+import SiteScene from "./SiteScene";
 import MissionPath from "./MissionPath";
 import EyeView from "./EyeView";
 import PanoView from "./PanoView";
@@ -7,6 +8,7 @@ import MapInset from "./MapInset";
 import {
   Camera,
   MapWaypoint,
+  SiteDrive,
   StereoPair,
   Stop,
   fetchCameras,
@@ -14,6 +16,7 @@ import {
   fetchImage,
   fetchMap,
   fetchPanoMeta,
+  fetchSiteWorld,
   fetchStats,
   fetchStereoDepth,
   fetchStereoPairs,
@@ -25,7 +28,7 @@ import {
 } from "./api";
 import { bodyTupleToThreeAligned } from "./coords";
 
-type ViewMode = "path" | "stop";
+type ViewMode = "path" | "stop" | "site";
 
 const LAYER_OPTIONS = [
   { id: "NAVCAM", match: (s: string) => s.includes("NAVCAM") },
@@ -94,6 +97,13 @@ export default function App() {
   const [depthLoading, setDepthLoading] = useState(false);
   const [pointCloud, setPointCloud] = useState<StereoPointCloud | null>(null);
   const [showPointCloud, setShowPointCloud] = useState(true);
+  // Site-scale multi-drive world
+  const [siteDrives, setSiteDrives] = useState<SiteDrive[]>([]);
+  const [siteCameras, setSiteCameras] = useState<Camera[]>([]);
+  const [siteOriginE, setSiteOriginE] = useState<number | null>(null);
+  const [siteOriginN, setSiteOriginN] = useState<number | null>(null);
+  const [siteLoading, setSiteLoading] = useState(false);
+  const [siteNote, setSiteNote] = useState<string | null>(null);
   const bootstrapped = useRef(false);
 
   useEffect(() => {
@@ -146,6 +156,8 @@ export default function App() {
         if (resolved) setSelectedStop(resolved);
         if (viewParam === "stop" && resolved) {
           setViewMode("stop");
+        } else if (viewParam === "site" && resolved?.site != null) {
+          setViewMode("site");
         } else {
           setViewMode("path");
         }
@@ -244,6 +256,38 @@ export default function App() {
       .catch(() => setPairs([]))
       .finally(() => setPairsLoading(false));
   }, [selectedStop, viewMode]);
+
+  // Site-scale multi-drive world
+  useEffect(() => {
+    if (viewMode !== "site") return;
+    if (selectedStop?.site == null) return;
+    const site = selectedStop.site;
+    setSiteLoading(true);
+    setError(null);
+    setEyeMode(false);
+    setPanoMode(false);
+    setSelected(null);
+    setDetail(null);
+    fetchSiteWorld(site, { max_drives: 24, max_per_drive: 80, max_total: 1000 })
+      .then((r) => {
+        setSiteDrives(r.drives || []);
+        setSiteCameras(r.cameras || []);
+        setSiteOriginE(r.origin_easting);
+        setSiteOriginN(r.origin_northing);
+        setSiteNote(
+          `site ${r.site} · ${r.n_drives} drives (${r.n_drives_mapped} mapped) · ` +
+            `${r.returned}/${r.total_cameras} cams` +
+            (r.note ? ` · ${r.note}` : "")
+        );
+      })
+      .catch((e) => {
+        setError(String(e));
+        setSiteDrives([]);
+        setSiteCameras([]);
+        setSiteNote(null);
+      })
+      .finally(() => setSiteLoading(false));
+  }, [viewMode, selectedStop?.site]);
 
   const solRange = useMemo(() => {
     const sols = cameras
@@ -460,6 +504,14 @@ export default function App() {
     setPanoMode(false);
   }
 
+  function openSiteWorld() {
+    if (selectedStop?.site == null) return;
+    setPlaying(false);
+    setEyeMode(false);
+    setPanoMode(false);
+    setViewMode("site");
+  }
+
   async function openSitePano(size: PanoSourceSize = panoSize) {
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
       return;
@@ -563,6 +615,15 @@ export default function App() {
               onClick={() => selectedStop && setViewMode("stop")}
             >
               Stop cameras
+            </button>
+            <button
+              type="button"
+              className={viewMode === "site" ? "active" : ""}
+              disabled={selectedStop?.site == null}
+              onClick={openSiteWorld}
+              title="All drives at this site in shared EN frame"
+            >
+              Site world
             </button>
           </div>
           <input
@@ -858,6 +919,9 @@ export default function App() {
         {loading && viewMode === "stop" && (
           <div className="status-banner">Loading cameras…</div>
         )}
+        {siteLoading && viewMode === "site" && (
+          <div className="status-banner">Loading site multi-drive world…</div>
+        )}
         {viewMode === "path" ? (
           <MissionPath
             stops={filteredStops.length ? filteredStops : stops}
@@ -869,6 +933,68 @@ export default function App() {
             showBasemap={showBasemap}
             basemapLayer={basemapLayer}
           />
+        ) : viewMode === "site" ? (
+          <>
+            <SiteScene
+              site={selectedStop?.site ?? 0}
+              drives={siteDrives}
+              cameras={siteCameras}
+              originEasting={siteOriginE}
+              originNorthing={siteOriginN}
+              selectedId={selected?.imageid ?? null}
+              focusDrive={selectedStop?.drive ?? null}
+              onSelect={(c) => {
+                setSelected(c);
+                fetchImage(c.imageid)
+                  .then((d) => setDetail(d as Camera))
+                  .catch(() => setDetail(c));
+                // Sync selected stop to this drive when possible
+                if (c.site != null && c.drive != null) {
+                  const hit = stops.find(
+                    (s) => s.site === c.site && s.drive === c.drive
+                  );
+                  if (hit) setSelectedStop(hit);
+                }
+              }}
+              showPhotoWorld={showPhotoWorld}
+              showRays={showRays}
+              maxPlanes={60}
+            />
+            <div className="hud">
+              {siteNote ??
+                (selectedStop
+                  ? `Site ${selectedStop.site} multi-drive world`
+                  : "Select a stop to open its site")}
+              <div className="muted">
+                Shared EN frame (X east, Y up, Z −north) · body poses + MMGIS
+                anchors ·{" "}
+                <button type="button" className="linkish" onClick={openMissionPath}>
+                  ← Mission path
+                </button>
+                {" · "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={!selectedStop}
+                  onClick={() => selectedStop && setViewMode("stop")}
+                >
+                  Stop cameras
+                </button>
+                {selected && (
+                  <>
+                    {" · "}
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => selectedStop && setViewMode("stop")}
+                    >
+                      Open drive {selected.drive} body frame
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </>
         ) : panoMode && panoSrc ? (
           <PanoView
             imageUrl={panoSrc}
@@ -969,6 +1095,15 @@ export default function App() {
                 {" · "}
                 <button type="button" className="linkish" onClick={openMissionPath}>
                   ← Mission path
+                </button>
+                {" · "}
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={selectedStop?.site == null}
+                  onClick={openSiteWorld}
+                >
+                  Site multi-drive world
                 </button>
                 {panoError && (
                   <div className="depth-meta" style={{ color: "#f0a0a0" }}>
