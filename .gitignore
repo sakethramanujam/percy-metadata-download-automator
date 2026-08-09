@@ -11,18 +11,21 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Local data / downloads / logs
+# Local data / downloads / logs / caches
 data/
 logs/
 *.csv
-!scripts/*_metadata.csv
+*.parquet
+# never re-include sample dumps under scripts/
+scripts/*_metadata.csv
+scripts/*metadata*.csv
 
 # Playground web
 playground/web/node_modules/
 playground/web/dist/
 
 
-# Kaggle upload staging (keep metadata JSON)
+# Kaggle upload staging (keep metadata JSON only — not the CSV payload)
 kaggle_dataset/*
 !kaggle_dataset/dataset-metadata.json
 

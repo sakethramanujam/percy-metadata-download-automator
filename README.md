@@ -159,16 +159,18 @@ See [playground/README.md](playground/README.md).
 data/                         # local full-metadata.csv + state.json (gitignored)
 data/derived/                 # parquet index for playground (gitignored)
 kaggle_dataset/
-  dataset-metadata.json       # Kaggle dataset id / description
+  dataset-metadata.json       # Kaggle dataset id / description only
+  full-metadata.csv           # staging copy for publish (gitignored)
 scripts/
   metadata.py                 # main CLI
   run_daily.sh                # cron/systemd entrypoint
-  *_metadata.csv              # small historical samples
 playground/
   pipeline/                   # CSV → parquet index
   api/                        # FastAPI
   web/                        # Vite + React Three Fiber UI
 ```
+
+Catalogue CSVs and parquet indexes are **not** committed; publish goes to Kaggle via `scripts/metadata.py publish`.
 
 ## Notes
 
