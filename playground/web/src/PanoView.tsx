@@ -10,6 +10,7 @@ export default function PanoView({
   meta,
   downloadName,
   onClose,
+  onSphere,
 }: {
   imageUrl: string;
   title?: string;
@@ -17,6 +18,8 @@ export default function PanoView({
   /** Suggested download filename (e.g. pano_3_0_equirect.jpg) */
   downloadName?: string;
   onClose: () => void;
+  /** Switch to immersive photo sphere (when image is equirect) */
+  onSphere?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [offset, setOffset] = useState(0.5); // 0..1 horizontal scroll center
@@ -91,6 +94,11 @@ export default function PanoView({
           {meta && <span className="muted"> · {meta}</span>}
         </div>
         <div className="pano-actions">
+          {onSphere && (
+            <button type="button" onClick={onSphere}>
+              Photo sphere
+            </button>
+          )}
           <button type="button" onClick={downloadPano} disabled={downloading}>
             {downloading ? "Saving…" : "Download JPEG"}
           </button>

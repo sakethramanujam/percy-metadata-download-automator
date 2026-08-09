@@ -4,6 +4,7 @@ import SiteScene from "./SiteScene";
 import MissionPath from "./MissionPath";
 import EyeView from "./EyeView";
 import PanoView from "./PanoView";
+import PhotoSphere from "./PhotoSphere";
 import MapInset from "./MapInset";
 import TourOverlay from "./TourOverlay";
 import CoverageHeatmap from "./CoverageHeatmap";
@@ -94,6 +95,8 @@ export default function App() {
   const [panoSize, setPanoSize] = useState<PanoSourceSize>("large");
   const [panoProjection, setPanoProjection] =
     useState<PanoProjection>("cylinder");
+  /** sphere = 3D photo sphere (equirect); flat = 2D drag strip */
+  const [panoViewMode, setPanoViewMode] = useState<"sphere" | "flat">("sphere");
   const [coverage, setCoverage] = useState<CoverageResult | null>(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState<string | null>(null);
@@ -709,11 +712,16 @@ export default function App() {
 
   async function openSitePano(
     size: PanoSourceSize = panoSize,
-    projection: PanoProjection = panoProjection
+    projection: PanoProjection = panoProjection,
+    opts?: { asSphere?: boolean }
   ) {
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
       return;
     }
+    // Photo spheres need full equirect
+    const asSphere = Boolean(opts?.asSphere);
+    if (asSphere) projection = "equirect";
+
     setPanoLoading(true);
     setPanoError(null);
     setPanoMeta(null);
@@ -765,6 +773,10 @@ export default function App() {
           projection,
         }) + `&t=${meta.n_frames}-${size}-${projection}`
       );
+      setPanoProjection(projection);
+      setPanoViewMode(
+        asSphere || projection === "equirect" ? "sphere" : "flat"
+      );
       setPanoMode(true);
       setEyeMode(false);
     } catch (e) {
@@ -772,6 +784,10 @@ export default function App() {
     } finally {
       setPanoLoading(false);
     }
+  }
+
+  function openPhotoSphere() {
+    void openSitePano(panoSize, "equirect", { asSphere: true });
   }
 
   function reloadCoverage() {
@@ -1269,6 +1285,23 @@ export default function App() {
               </div>
             </div>
           </>
+        ) : panoMode && panoSrc && panoViewMode === "sphere" ? (
+          <PhotoSphere
+            imageUrl={panoSrc}
+            title={
+              selectedStop
+                ? `Photo sphere · site ${selectedStop.site} / drive ${selectedStop.drive}`
+                : "Photo sphere"
+            }
+            meta={panoMeta ?? undefined}
+            downloadName={
+              selectedStop
+                ? `sphere_${selectedStop.site}_${selectedStop.drive}_equirect.jpg`
+                : "photo_sphere.jpg"
+            }
+            onClose={() => setPanoMode(false)}
+            onFlat={() => setPanoViewMode("flat")}
+          />
         ) : panoMode && panoSrc ? (
           <PanoView
             imageUrl={panoSrc}
@@ -1284,6 +1317,11 @@ export default function App() {
                 : `pano_${panoProjection}.jpg`
             }
             onClose={() => setPanoMode(false)}
+            onSphere={
+              panoProjection === "equirect"
+                ? () => setPanoViewMode("sphere")
+                : undefined
+            }
           />
         ) : eyeMode && selected && selected.pos_x != null ? (
           <EyeView
@@ -1355,19 +1393,33 @@ export default function App() {
                     selectedStop.site == null ||
                     selectedStop.drive == null
                   }
+                  onClick={openPhotoSphere}
+                  title="Stitch equirect and open immersive 360° photo sphere"
+                >
+                  {panoLoading ? "Stitching sphere…" : "Photo sphere"}
+                </button>
+                <button
+                  type="button"
+                  className="linkish"
+                  disabled={
+                    panoLoading ||
+                    !selectedStop ||
+                    selectedStop.site == null ||
+                    selectedStop.drive == null
+                  }
                   onClick={() => openSitePano(panoSize, panoProjection)}
                 >
                   {panoLoading
                     ? "Stitching pano…"
                     : panoProjection === "equirect"
-                      ? "Equirect pano"
+                      ? "Equirect flat"
                       : "Site panorama"}
                 </button>
                 <select
                   className="pano-size-select"
                   value={panoProjection}
                   disabled={panoLoading}
-                  title="cylinder = adaptive crop; equirect = full 360×180 export"
+                  title="cylinder = adaptive crop; equirect = full 360×180"
                   onChange={(e) =>
                     setPanoProjection(e.target.value as PanoProjection)
                   }
