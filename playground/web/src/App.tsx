@@ -1231,8 +1231,8 @@ export default function App() {
                 className="export-btn"
                 disabled={
                   panoLoading ||
-                  selectedStop.site == null ||
-                  selectedStop.drive == null
+                  selectedStop?.site == null ||
+                  selectedStop?.drive == null
                 }
                 onClick={openPhotoSphere}
               >
