@@ -92,11 +92,12 @@ export default function App() {
   const [panoMeta, setPanoMeta] = useState<string | null>(null);
   const [panoError, setPanoError] = useState<string | null>(null);
   const [panoSrc, setPanoSrc] = useState<string | null>(null);
-  const [panoSize, setPanoSize] = useState<PanoSourceSize>("large");
+  const [panoSize, setPanoSize] = useState<PanoSourceSize>("medium");
   const [panoProjection, setPanoProjection] =
     useState<PanoProjection>("cylinder");
   /** sphere = 3D photo sphere (equirect); flat = 2D drag strip */
   const [panoViewMode, setPanoViewMode] = useState<"sphere" | "flat">("sphere");
+  const pendingSphere = useRef(false);
   const [coverage, setCoverage] = useState<CoverageResult | null>(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState<string | null>(null);
@@ -168,6 +169,10 @@ export default function App() {
         const siteParam = params.get("site");
         const driveParam = params.get("drive");
         const imageParam = params.get("image");
+        const sphereParam = params.get("sphere");
+        if (sphereParam === "1" || sphereParam === "true") {
+          pendingSphere.current = true;
+        }
         const tourFromUrl = parseTourFromUrl();
         if (tourFromUrl) pendingTour.current = tourFromUrl;
         let resolved: Stop | null = null;
@@ -781,13 +786,23 @@ export default function App() {
         throw new Error(`${r.status} ${detail.slice(0, 200)}`);
       }
       const blob = await r.blob();
-      if (!blob.size || !blob.type.includes("image")) {
-        // Some proxies return JSON error as 200 with wrong type
-        const text = await blob.text();
-        throw new Error(`expected JPEG, got: ${text.slice(0, 160)}`);
+      if (!blob.size) {
+        throw new Error("empty pano response");
       }
-      // Prefer blob URL so TextureLoader doesn't re-hit a slow endpoint
-      const objUrl = URL.createObjectURL(blob);
+      // Validate JPEG magic — some proxies leave blob.type empty
+      const head = new Uint8Array(await blob.slice(0, 3).arrayBuffer());
+      const isJpeg = head[0] === 0xff && head[1] === 0xd8;
+      const isPng = head[0] === 0x89 && head[1] === 0x50;
+      if (!isJpeg && !isPng) {
+        const text = await blob.text();
+        throw new Error(
+          `expected JPEG, got ${blob.type || "unknown"}: ${text.slice(0, 160)}`
+        );
+      }
+      // Prefer blob URL so the sphere never re-fetches a slow endpoint
+      const objUrl = URL.createObjectURL(
+        blob.type ? blob : new Blob([blob], { type: "image/jpeg" })
+      );
       // Revoke previous blob if any
       if (panoSrc?.startsWith("blob:")) {
         try {
@@ -829,11 +844,24 @@ export default function App() {
   }
 
   function openPhotoSphere() {
-    // Prefer medium for reliable WebGL upload
+    // Prefer medium for reliable WebGL upload on 4GB GPUs
     const size: PanoSourceSize =
-      panoSize === "full" || panoSize === "large" ? "medium" : panoSize;
+      panoSize === "full" || panoSize === "large" ? "medium" : panoSize || "medium";
     void openSitePano(size, "equirect", { asSphere: true });
   }
+
+  // Deep link ?sphere=1 — open photo sphere once cameras for the stop are ready
+  useEffect(() => {
+    if (!pendingSphere.current) return;
+    if (viewMode !== "stop") return;
+    if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
+      return;
+    }
+    if (loading || cameras.length === 0) return;
+    pendingSphere.current = false;
+    openPhotoSphere();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, selectedStop?.stop_id, loading, cameras.length]);
 
   function reloadCoverage() {
     if (!selectedStop || selectedStop.site == null || selectedStop.drive == null) {
@@ -1193,6 +1221,34 @@ export default function App() {
                 />
               )}
             </div>
+            <h2>Photo sphere</h2>
+            <div className="coverage-panel">
+              <div className="muted" style={{ marginBottom: 8, fontSize: "0.78rem" }}>
+                Immersive 360° from pose-driven equirect stitch (navcam-first).
+              </div>
+              <button
+                type="button"
+                className="export-btn"
+                disabled={
+                  panoLoading ||
+                  selectedStop.site == null ||
+                  selectedStop.drive == null
+                }
+                onClick={openPhotoSphere}
+              >
+                {panoLoading ? "Building photo sphere…" : "Open photo sphere"}
+              </button>
+              {panoMeta && !panoMode && (
+                <div className="muted depth-meta" style={{ marginTop: 6 }}>
+                  {panoMeta}
+                </div>
+              )}
+              {panoError && (
+                <div className="depth-meta" style={{ color: "#f0a0a0", marginTop: 6 }}>
+                  {panoError}
+                </div>
+              )}
+            </div>
             <h2>
               Coverage{" "}
               <span className="muted">az × el · body frame</span>
@@ -1243,6 +1299,17 @@ export default function App() {
         )}
         {siteLoading && viewMode === "site" && (
           <div className="status-banner">Loading site multi-drive world…</div>
+        )}
+        {panoLoading && (
+          <div className="status-banner pano-loading-banner">
+            {panoMeta || "Stitching panorama…"}
+            <span className="muted"> — first build can take 1–3 min</span>
+          </div>
+        )}
+        {panoError && !panoMode && (
+          <div className="status-banner" style={{ color: "#f0a0a0" }}>
+            Pano / sphere: {panoError}
+          </div>
         )}
         {activeTour && activeTour.steps[tourStep] && (
           <TourOverlay

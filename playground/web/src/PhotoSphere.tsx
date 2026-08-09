@@ -48,10 +48,9 @@ function loadEquirectTexture(url: string): Promise<THREE.Texture> {
         tex.generateMipmaps = true;
         tex.minFilter = THREE.LinearMipmapLinearFilter;
         tex.magFilter = THREE.LinearFilter;
-        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
         tex.wrapT = THREE.ClampToEdgeWrapping;
-        // Image center (az 0) → look forward (+Z after our look math)
-        tex.offset.x = 0.5;
+        tex.flipY = true;
         tex.needsUpdate = true;
         resolve(tex);
       } catch (e) {
@@ -65,12 +64,14 @@ function loadEquirectTexture(url: string): Promise<THREE.Texture> {
 }
 
 function SphereMesh({ texture }: { texture: THREE.Texture }) {
+  // Standard inside-out sphere: BackSide faces the camera at the origin.
+  // scale.x = -1 mirrors so left/right match body-frame az direction.
   return (
     <mesh scale={[-1, 1, 1]}>
-      <sphereGeometry args={[100, 64, 48]} />
+      <sphereGeometry args={[50, 64, 48]} />
       <meshBasicMaterial
         map={texture}
-        side={THREE.FrontSide}
+        side={THREE.BackSide}
         toneMapped={false}
         depthWrite={false}
       />
@@ -316,10 +317,10 @@ export default function PhotoSphere({
         {loadState === "ready" && tex && (
           <Canvas
             camera={{
-              fov: 75,
-              near: 0.1,
-              far: 500,
-              position: [0, 0, 0.01],
+              fov: 80,
+              near: 0.01,
+              far: 200,
+              position: [0, 0, 0.001],
             }}
             gl={{
               antialias: true,
