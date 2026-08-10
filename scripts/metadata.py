@@ -85,6 +85,64 @@ def save_state(state_path: Path, state: dict) -> None:
         f.write("\n")
 
 
+def pre_merge_backups(data_dir: Path) -> list[Path]:
+    """List full-metadata.pre-merge-*.csv backups, oldest first."""
+    data_dir = Path(data_dir)
+    return sorted(data_dir.glob("full-metadata.pre-merge-*.csv"))
+
+
+def prune_pre_merge_backups(data_dir: Path, *, keep: int = 0) -> list[Path]:
+    """Delete pre-merge CSV backups, keeping at most `keep` newest.
+
+    Each backup is a full copy of the catalogue (~0.5–1GB). Cron / merge must
+    not leave these around or the disk fills quickly.
+    """
+    keep = max(int(keep), 0)
+    backups = pre_merge_backups(data_dir)
+    if keep:
+        to_delete = backups[:-keep] if len(backups) > keep else []
+    else:
+        to_delete = backups
+    removed: list[Path] = []
+    for path in to_delete:
+        try:
+            path.unlink(missing_ok=True)
+            removed.append(path)
+            print(f"Removed stale backup {path.name}")
+        except OSError as e:
+            print(f"WARNING: could not remove {path}: {e}")
+    return removed
+
+
+def stage_metadata_for_kaggle(src: Path, dest: Path) -> None:
+    """Stage CSV into the Kaggle upload dir using a hardlink when possible.
+
+    Avoids a second multi-hundred-MB copy on the same filesystem. Falls back
+    to shutil.copy2 when link is not allowed (cross-device, permissions).
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        dest.unlink(missing_ok=True)
+    try:
+        os.link(src, dest)
+        print(f"Staged {dest.name} (hardlink → {src})")
+    except OSError:
+        shutil.copy2(src, dest)
+        print(f"Staged {dest.name} (copy → {src})")
+
+
+def unstage_kaggle_csv(kaggle_dir: Path, name: str = DEFAULT_METADATA_NAME) -> None:
+    """Drop staged full-metadata.csv after publish so it doesn't double disk use."""
+    path = Path(kaggle_dir) / name
+    if path.is_file():
+        try:
+            path.unlink()
+            print(f"Removed staged upload file {path.name}")
+        except OSError as e:
+            print(f"WARNING: could not remove staged {path}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # NASA API
 # ---------------------------------------------------------------------------
@@ -422,15 +480,38 @@ def cmd_update(args: argparse.Namespace) -> int:
         known = local_rows
         print(f"State missing total_images; using local row count {known}")
 
-    # Cover both "NASA grew since last complete sync" and "local catalogue
-    # is still catching up after a seed / partial run".
+    # NASA's stats `total` (~1M) is NOT the same metric as unique imageids in
+    # the paginated raw-images feed (~560k). After a complete catch-up we only
+    # chase *growth* in the NASA counter. During incomplete catch-up we still
+    # estimate remaining pages from remote_total vs local_rows (imperfect but
+    # useful for resume); prefer --start-page for controlled deep archives.
     growth = max(remote_total - known, 0)
-    deficit = max(remote_total - local_rows, 0)
-    new_count = max(growth, deficit)
-    print(
-        f"NASA total={remote_total}, known={known}, local_rows={local_rows}, "
-        f"delta={new_count}"
-    )
+    complete = bool(state.get("complete"))
+    if complete and known > 0:
+        deficit = 0
+        new_count = growth
+        # Always nibble a few newest pages so delayed publishes aren't missed
+        # when NASA's total counter lags or stays flat.
+        if new_count <= 0 and not args.force_refresh_pages:
+            # Fall through to a small newest-page refresh below via page_buffer
+            # by treating as a tiny growth. Callers can --max-pages to cap.
+            new_count = PAGE_SIZE  # one page worth; buffer adds more
+            print(
+                f"NASA total={remote_total}, known={known}, local_rows={local_rows}, "
+                f"complete=true → newest-page refresh (no deficit re-crawl)"
+            )
+        else:
+            print(
+                f"NASA total={remote_total}, known={known}, local_rows={local_rows}, "
+                f"growth={growth} (complete catalogue; ignoring total-vs-rows deficit)"
+            )
+    else:
+        deficit = max(remote_total - local_rows, 0)
+        new_count = max(growth, deficit)
+        print(
+            f"NASA total={remote_total}, known={known}, local_rows={local_rows}, "
+            f"delta={new_count} (incomplete catch-up)"
+        )
 
     if new_count <= 0 and not args.force_refresh_pages:
         print("Nothing new to download.")
@@ -511,27 +592,37 @@ def cmd_update(args: argparse.Namespace) -> int:
     added = len(merged) - len(existing)
     # Only mark fully synced when the run was not page-capped and we covered
     # through the end of the NASA catalogue from start_page 0 (or a full resume).
+    # Exception: a catalogue already marked complete only needs a newest-page
+    # refresh; NASA stats `total` is a different metric from unique imageids, so
+    # never demote complete→incomplete just because max-pages capped the nibble.
     reached_end = (start_page + pages_needed) >= total_pages and not partial
-    if not reached_end:
-        synced_total = len(merged)
+    was_complete = bool(state.get("complete"))
+    stay_complete = was_complete and start_page == 0
+    if not reached_end and not stay_complete:
         print(
-            f"Partial update: local has {synced_total} unique rows; "
+            f"Partial update: local has {len(merged)} unique rows; "
             f"NASA has {remote_total}. Re-run update "
             f"(e.g. --start-page {start_page + pages_needed}) to continue catch-up."
         )
-    else:
-        synced_total = remote_total
+    elif stay_complete and not reached_end:
+        print(
+            f"Newest-page refresh: +{max(added, 0)} rows "
+            f"(local unique={len(merged)}; NASA stats total={remote_total}). "
+            f"Catalogue remains complete."
+        )
 
+    # total_images tracks the NASA stats counter for growth detection — not
+    # local unique rows (those live in n_rows).
     state.update(
         {
             "last_updated": now_iso(),
-            "total_images": synced_total if reached_end else len(merged),
+            "total_images": remote_total if (reached_end or stay_complete) else len(merged),
             "n_rows": len(merged),
             "metadata_file": meta_path.name,
             "last_patch_rows": len(patch),
             "last_rows_added": max(added, 0),
-            "last_partial": not reached_end,
-            "complete": reached_end and len(merged) > 0,
+            "last_partial": not (reached_end or stay_complete),
+            "complete": (reached_end or stay_complete) and len(merged) > 0,
             "catchup_pages_done": start_page + pages_needed,
             "catchup_pages_total": total_pages,
             "catchup_start_page": start_page,
@@ -564,17 +655,32 @@ def cmd_merge_checkpoint(args: argparse.Namespace) -> int:
     patch = load_metadata(checkpoint_path)
     print(f"  patch unique={patch['imageid'].nunique() if 'imageid' in patch.columns else len(patch)}")
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = Path(args.data_dir) / f"full-metadata.pre-merge-{stamp}.csv"
-    shutil.copy2(meta_path, backup)
-    print(f"Backup -> {backup.name}")
+    # Optional one-shot backup (off by default — each is ~1GB).
+    keep_backup = bool(getattr(args, "keep_backup", False))
+    backup: Optional[Path] = None
+    if keep_backup:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = Path(args.data_dir) / f"full-metadata.pre-merge-{stamp}.csv"
+        shutil.copy2(meta_path, backup)
+        print(f"Backup -> {backup.name}")
+    else:
+        # Always drop any leftovers from older runs before rewriting the CSV.
+        prune_pre_merge_backups(args.data_dir, keep=0)
 
     merged = merge_metadata(existing, patch)
     save_metadata(merged, meta_path)
     added = len(merged) - len(existing)
     print(f"Merged: {len(existing)} -> {len(merged)} (+{max(added, 0)})")
 
-    if args.remove_checkpoint:
+    # Drop the just-created backup after a successful merge unless user wants it.
+    if backup is not None and not getattr(args, "retain_backup", False):
+        backup.unlink(missing_ok=True)
+        print(f"Removed merge backup {backup.name} (merge OK)")
+    else:
+        # Cap retained backups at 1 newest even when --keep-backup is used.
+        prune_pre_merge_backups(args.data_dir, keep=1 if keep_backup else 0)
+
+    if args.remove_checkpoint or not getattr(args, "keep_checkpoint", False):
         checkpoint_path.unlink(missing_ok=True)
         print("Removed patch-checkpoint.csv")
 
@@ -618,9 +724,9 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"Missing {meta_json}")
         return 1
 
-    # Copy current full metadata into the upload folder
+    # Stage without a second multi-hundred-MB copy when possible (hardlink).
     dest_csv = kaggle_dir / meta_path.name
-    shutil.copy2(meta_path, dest_csv)
+    stage_metadata_for_kaggle(meta_path, dest_csv)
 
     state = load_state(state_path)
     message = args.message or (
@@ -647,18 +753,27 @@ def cmd_publish(args: argparse.Namespace) -> int:
         subprocess.run(cmd, check=True)
     except FileNotFoundError:
         print("kaggle CLI not found. Install with: pip install -r requirements.txt")
+        unstage_kaggle_csv(kaggle_dir, meta_path.name)
         return 1
     except subprocess.CalledProcessError as e:
         print(f"Kaggle publish failed with exit code {e.returncode}")
+        # Leave staged file for retry inspection only if --keep-staging.
+        if not getattr(args, "keep_staging", False):
+            unstage_kaggle_csv(kaggle_dir, meta_path.name)
         return e.returncode or 1
 
     print("Kaggle dataset version created.")
+    if not getattr(args, "keep_staging", False):
+        unstage_kaggle_csv(kaggle_dir, meta_path.name)
     return 0
 
 
 def cmd_daily(args: argparse.Namespace) -> int:
     """Update local metadata; publish to Kaggle only if new rows were added (or --always-publish)."""
     meta_path, state_path = data_paths(args.data_dir)
+    # Housekeeping: never let multi-GB pre-merge leftovers accumulate under cron.
+    prune_pre_merge_backups(args.data_dir, keep=0)
+
     before = load_state(state_path)
     before_rows = int(before.get("n_rows") or 0)
 
@@ -674,6 +789,8 @@ def cmd_daily(args: argparse.Namespace) -> int:
         print(f"Publishing (added={added}, always_publish={args.always_publish})...")
         return cmd_publish(args)
 
+    # Even when we skip publish, drop any leftover staged Kaggle CSV.
+    unstage_kaggle_csv(Path(args.kaggle_dir), meta_path.name)
     print("No new rows; skipping Kaggle publish.")
     return 0
 
@@ -705,7 +822,22 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument(
         "--remove-checkpoint",
         action="store_true",
-        help="Delete patch-checkpoint.csv after a successful merge",
+        help="Delete patch-checkpoint.csv after a successful merge (default: always remove)",
+    )
+    mp.add_argument(
+        "--keep-checkpoint",
+        action="store_true",
+        help="Keep patch-checkpoint.csv after merge",
+    )
+    mp.add_argument(
+        "--keep-backup",
+        action="store_true",
+        help="Write a full-metadata.pre-merge-*.csv before merging (default: no)",
+    )
+    mp.add_argument(
+        "--retain-backup",
+        action="store_true",
+        help="With --keep-backup, leave the backup on disk after a successful merge",
     )
     mp.set_defaults(func=cmd_merge_checkpoint)
 
@@ -796,6 +928,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pp.add_argument("-m", "--message", default=None, help="Dataset version notes")
     pp.add_argument("-q", "--quiet", action="store_true")
+    pp.add_argument(
+        "--keep-staging",
+        action="store_true",
+        help="Keep kaggle_dataset/full-metadata.csv after publish (default: remove)",
+    )
     pp.set_defaults(func=cmd_publish)
 
     dp = sub.add_parser(
@@ -828,6 +965,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--always-publish",
         action="store_true",
         help="Publish even when no new rows were added",
+    )
+    dp.add_argument(
+        "--keep-staging",
+        action="store_true",
+        help="Keep kaggle_dataset/full-metadata.csv after publish (default: remove)",
     )
     dp.set_defaults(func=cmd_daily)
 
